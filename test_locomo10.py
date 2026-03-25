@@ -31,7 +31,7 @@ except Exception as e:
 
 # Initialize SentenceTransformer model for semantic similarity
 try:
-    sentence_model = SentenceTransformer('all-MiniLM-L6-v2')
+    sentence_model = SentenceTransformer('/mnt/sdb/liuqiaoan/all-MiniLM-L6-v2')
 except Exception as e:
     print(f"Warning: Could not load SentenceTransformer model: {e}")
     sentence_model = None
