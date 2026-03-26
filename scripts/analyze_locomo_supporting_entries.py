@@ -50,6 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-json", type=Path, default=Path("test_ref/locomo10.json"), help="LoCoMo dataset JSON path.")
     parser.add_argument("--entries-dir", type=Path, default=Path("."), help="Directory with locomo10_sample_*_memory_entries.json files.")
     parser.add_argument("--output-json", type=Path, default=Path("outputs/locomo_support_analysis.json"), help="Output JSON report path.")
+    parser.add_argument(
+        "--per-sample-output-dir",
+        type=Path,
+        default=None,
+        help="Directory to save per-sample analysis JSON files. Defaults to <output-json-stem>_samples.",
+    )
     parser.add_argument("--categories", type=int, nargs="+", default=DEFAULT_CATEGORIES, help="QA categories to analyze.")
     parser.add_argument("--k-values", type=int, nargs="+", default=DEFAULT_K_VALUES, help="Top-k values to evaluate.")
     parser.add_argument("--sample-indices", type=int, nargs="*", default=None, help="Optional subset of sample indices.")
@@ -401,6 +407,44 @@ def summarize(all_results: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def build_report(
+    *,
+    args: argparse.Namespace,
+    categories: set[int],
+    selected_indices: set[int] | None,
+    missing_entry_files: list[int],
+    all_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "config": {
+            "dataset_json": str(args.dataset_json),
+            "entries_dir": str(args.entries_dir),
+            "categories": sorted(categories),
+            "k_values": args.k_values,
+            "sample_indices": sorted(selected_indices) if selected_indices is not None else None,
+            "retrieval_mode": "simplemem_system_hybrid_retriever",
+            "retrieval_api": "system.hybrid_retriever.retrieve",
+            "llm": {
+                "model": args.model,
+                "base_url": args.base_url,
+                "temperature": args.temperature,
+                "max_retries": args.max_retries,
+                "entry_text_max_chars": args.entry_text_max_chars,
+                "storage_check_top_n": args.storage_check_top_n,
+            },
+        },
+        "missing_entry_files": missing_entry_files,
+        "summary": summarize(all_results),
+        "results": all_results,
+    }
+
+
+def save_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def main() -> None:
     args = parse_args()
     args.k_values = sorted(set(args.k_values))
@@ -431,6 +475,9 @@ def main() -> None:
 
     all_results: list[dict[str, Any]] = []
     missing_entry_files: list[int] = []
+    per_sample_output_dir = args.per_sample_output_dir
+    if per_sample_output_dir is None:
+        per_sample_output_dir = args.output_json.parent / f"{args.output_json.stem}_samples"
 
     for sample_idx, sample in enumerate(dataset):
         if selected_indices is not None and sample_idx not in selected_indices:
@@ -459,32 +506,25 @@ def main() -> None:
         )
         all_results.extend(sample_results)
 
-    report = {
-        "config": {
-            "dataset_json": str(args.dataset_json),
-            "entries_dir": str(args.entries_dir),
-            "categories": sorted(categories),
-            "k_values": args.k_values,
-            "sample_indices": sorted(selected_indices) if selected_indices is not None else None,
-            "retrieval_mode": "simplemem_system_hybrid_retriever",
-            "retrieval_api": "system.hybrid_retriever.retrieve",
-            "llm": {
-                "model": args.model,
-                "base_url": args.base_url,
-                "temperature": args.temperature,
-                "max_retries": args.max_retries,
-                "entry_text_max_chars": args.entry_text_max_chars,
-                "storage_check_top_n": args.storage_check_top_n,
-            },
-        },
-        "missing_entry_files": missing_entry_files,
-        "summary": summarize(all_results),
-        "results": all_results,
-    }
+        sample_report = build_report(
+            args=args,
+            categories=categories,
+            selected_indices=selected_indices,
+            missing_entry_files=[],
+            all_results=sample_results,
+        )
+        sample_output_path = per_sample_output_dir / f"locomo_support_analysis_sample_{sample_idx}.json"
+        save_json(sample_output_path, sample_report)
+        print(f"[Done] sample report saved: {sample_output_path}")
 
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    with args.output_json.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+    report = build_report(
+        args=args,
+        categories=categories,
+        selected_indices=selected_indices,
+        missing_entry_files=missing_entry_files,
+        all_results=all_results,
+    )
+    save_json(args.output_json, report)
 
     print(f"[Done] analyzed queries: {len(all_results)}")
     print(f"[Done] report saved: {args.output_json}")
