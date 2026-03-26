@@ -78,6 +78,8 @@ def compute_similarity_tsne(embeddings: np.ndarray, seed: int) -> np.ndarray:
     similarity = cosine_similarity(embeddings)
     distance = 1.0 - similarity
     np.fill_diagonal(distance, 0.0)
+    # fill negative values with 0.0
+    distance[distance < 0.0] = 0.0
 
     perplexity = min(30, n_samples - 1)
     tsne = TSNE(
@@ -167,6 +169,7 @@ def main() -> None:
         if not texts:
             print(f"[Skip] {file_path.name}: no entries")
             continue
+        print(f"[Loaded] {file_path.name}: {len(texts)} entries")
 
         embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
         coords = compute_tsne(embeddings, seed=args.seed)
