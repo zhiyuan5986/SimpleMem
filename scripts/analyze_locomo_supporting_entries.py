@@ -56,6 +56,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory to save per-sample analysis JSON files. Defaults to <output-json-stem>_samples.",
     )
+    parser.add_argument(
+        "--resume-per-sample",
+        action="store_true",
+        help="Resume from existing per-sample reports (locomo_support_analysis_sample_{idx}.json).",
+    )
     parser.add_argument("--categories", type=int, nargs="+", default=DEFAULT_CATEGORIES, help="QA categories to analyze.")
     parser.add_argument("--k-values", type=int, nargs="+", default=DEFAULT_K_VALUES, help="Top-k values to evaluate.")
     parser.add_argument("--sample-indices", type=int, nargs="*", default=None, help="Optional subset of sample indices.")
@@ -182,7 +187,15 @@ def llm_judge_support(
             if attempt < max_retries - 1:
                 time.sleep(1.5**attempt)
 
-    raise RuntimeError(f"LLM judge failed after retries: {last_err}")
+    err_msg = str(last_err) if last_err else "unknown_error"
+    print(f"[Warn] LLM judge failed after retries, fallback to can_answer=false: {err_msg}")
+    return {
+        "can_answer": False,
+        "reason": f"llm_judge_error: {err_msg}",
+        "confidence": 0.0,
+        "predicted_answer": "",
+        "minimal_supporting_entry_indices": [],
+    }
 
 
 def load_entries_file(path: Path) -> list[dict[str, Any]]:
@@ -445,6 +458,26 @@ def save_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+def load_existing_sample_results(path: Path, sample_idx: int) -> list[dict[str, Any]] | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Existing sample report is not a JSON object: {path}")
+    results = payload.get("results")
+    if not isinstance(results, list):
+        raise ValueError(f"Existing sample report has invalid 'results': {path}")
+    normalized: list[dict[str, Any]] = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("sample_idx", sample_idx)) != sample_idx:
+            continue
+        normalized.append(item)
+    return normalized
+
+
 def main() -> None:
     args = parse_args()
     args.k_values = sorted(set(args.k_values))
@@ -483,6 +516,14 @@ def main() -> None:
         if selected_indices is not None and sample_idx not in selected_indices:
             continue
 
+        sample_output_path = per_sample_output_dir / f"locomo_support_analysis_sample_{sample_idx}.json"
+        if args.resume_per_sample:
+            existing_results = load_existing_sample_results(sample_output_path, sample_idx)
+            if existing_results is not None:
+                all_results.extend(existing_results)
+                print(f"[Resume] skip sample {sample_idx}, loaded {len(existing_results)} records from: {sample_output_path}")
+                continue
+
         file_path = args.entries_dir / f"locomo10_sample_{sample_idx}_memory_entries.json"
         if not file_path.exists():
             missing_entry_files.append(sample_idx)
@@ -513,7 +554,6 @@ def main() -> None:
             missing_entry_files=[],
             all_results=sample_results,
         )
-        sample_output_path = per_sample_output_dir / f"locomo_support_analysis_sample_{sample_idx}.json"
         save_json(sample_output_path, sample_report)
         print(f"[Done] sample report saved: {sample_output_path}")
 
