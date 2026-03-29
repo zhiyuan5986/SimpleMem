@@ -21,6 +21,9 @@ from pathlib import Path
 from typing import Any
 
 from openai import OpenAI
+from core.answer_generator import AnswerGenerator
+from models.memory_entry import MemoryEntry
+from utils.llm_client import LLMClient
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,58 +79,32 @@ def calculate_f1(prediction: str, reference: str) -> float:
     return 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
 
 
-def format_entries_for_context(entries: list[dict[str, Any]], max_chars: int) -> str:
-    lines: list[str] = []
-    for idx, e in enumerate(entries):
-        text = str(e.get("lossless_restatement", "")).strip()
-        if len(text) > max_chars:
-            text = text[:max_chars] + " ...[truncated]"
-        lines.append(
-            f"[{idx}] id={e.get('entry_id')}\n"
-            f"text: {text}\n"
-            f"keywords: {e.get('keywords', [])}\n"
-            f"time: {e.get('timestamp')} | location: {e.get('location')}\n"
-        )
-    return "\n".join(lines)
+def _build_memory_entry(entry: dict[str, Any], max_chars: int) -> MemoryEntry:
+    text = str(entry.get("lossless_restatement", "")).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + " ...[truncated]"
+
+    return MemoryEntry(
+        entry_id=str(entry.get("entry_id", "")),
+        lossless_restatement=text,
+        keywords=[str(x) for x in (entry.get("keywords") or [])],
+        timestamp=entry.get("timestamp"),
+        location=entry.get("location"),
+        persons=[str(x) for x in (entry.get("persons") or [])],
+        entities=[str(x) for x in (entry.get("entities") or [])],
+        topic=entry.get("topic"),
+    )
 
 
 def generate_answer(
     *,
-    client: OpenAI,
-    model: str,
+    generator: AnswerGenerator,
     question: str,
     entries: list[dict[str, Any]],
-    temperature: float,
-    max_retries: int,
     entry_text_max_chars: int,
 ) -> str:
-    context_text = format_entries_for_context(entries, entry_text_max_chars)
-    prompt = (
-        "You are a QA assistant. Answer the question only based on the provided memory entries. "
-        "If the entries are insufficient, reply exactly: Not mentioned in the conversation.\n\n"
-        f"Question: {question}\n\n"
-        f"Memory Entries:\n{context_text}\n\n"
-        "Return only the final answer text."
-    )
-
-    last_err: Exception | None = None
-    for attempt in range(max_retries):
-        try:
-            rsp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You answer questions from retrieved memory entries."},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=temperature,
-            )
-            return (rsp.choices[0].message.content or "").strip()
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            if attempt < max_retries - 1:
-                time.sleep(1.5**attempt)
-
-    return f"Not mentioned in the conversation. [generation_error: {last_err}]"
+    contexts = [_build_memory_entry(entry, entry_text_max_chars) for entry in entries]
+    return generator.generate_answer(question, contexts)
 
 
 def llm_judge_answers(
@@ -209,25 +186,20 @@ Return ONLY the JSON, no other text.
 
 def evaluate_setting(
     *,
-    answer_client: OpenAI,
+    answer_generator: AnswerGenerator,
     judge_client: OpenAI,
-    answer_model: str,
     judge_model: str,
     query: str,
     gold_answer: str,
     entries: list[dict[str, Any]],
-    answer_temperature: float,
     judge_temperature: float,
     max_retries: int,
     entry_text_max_chars: int,
 ) -> dict[str, Any]:
     prediction = generate_answer(
-        client=answer_client,
-        model=answer_model,
+        generator=answer_generator,
         question=query,
         entries=entries,
-        temperature=answer_temperature,
-        max_retries=max_retries,
         entry_text_max_chars=entry_text_max_chars,
     )
     judge = llm_judge_answers(
@@ -278,7 +250,15 @@ def main() -> None:
     if not isinstance(results, list):
         raise ValueError("analysis-json format invalid: field 'results' must be a list")
 
-    answer_client = OpenAI(base_url=args.answer_base_url, api_key=answer_api_key)
+    answer_generator = AnswerGenerator(
+        llm_client=LLMClient(
+            api_key=answer_api_key,
+            model=args.answer_model,
+            base_url=args.answer_base_url,
+            enable_thinking=False,
+            use_streaming=False,
+        )
+    )
     judge_client = OpenAI(base_url=args.judge_base_url, api_key=judge_api_key)
 
     compared: list[dict[str, Any]] = []
@@ -315,14 +295,12 @@ def main() -> None:
 
         if stored_entries:
             stored_eval = evaluate_setting(
-                answer_client=answer_client,
+                answer_generator=answer_generator,
                 judge_client=judge_client,
-                answer_model=args.answer_model,
                 judge_model=args.judge_model,
                 query=query,
                 gold_answer=gold,
                 entries=stored_entries,
-                answer_temperature=args.answer_temperature,
                 judge_temperature=args.judge_temperature,
                 max_retries=args.max_retries,
                 entry_text_max_chars=args.entry_text_max_chars,
@@ -334,14 +312,12 @@ def main() -> None:
 
         if firstk_entries:
             firstk_eval = evaluate_setting(
-                answer_client=answer_client,
+                answer_generator=answer_generator,
                 judge_client=judge_client,
-                answer_model=args.answer_model,
                 judge_model=args.judge_model,
                 query=query,
                 gold_answer=gold,
                 entries=firstk_entries,
-                answer_temperature=args.answer_temperature,
                 judge_temperature=args.judge_temperature,
                 max_retries=args.max_retries,
                 entry_text_max_chars=args.entry_text_max_chars,
