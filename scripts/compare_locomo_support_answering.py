@@ -30,6 +30,17 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare LoCoMo answering quality across support entry settings.")
     parser.add_argument("--analysis-json", type=Path, required=True, help="Output JSON path from analyze_locomo_supporting_entries.py")
     parser.add_argument("--output-json", type=Path, default=Path("outputs/locomo_support_answer_compare.json"), help="Path to save evaluation results")
+    parser.add_argument(
+        "--per-sample-output-dir",
+        type=Path,
+        default=None,
+        help="Directory to save per-sample comparison JSON files. Defaults to <output-json-stem>_samples.",
+    )
+    parser.add_argument(
+        "--resume-per-sample",
+        action="store_true",
+        help="Resume from existing per-sample reports (locomo_support_answer_compare_sample_{idx}.json).",
+    )
 
     parser.add_argument("--answer-model", type=str, required=True, help="LLM model for answer generation")
     parser.add_argument("--answer-base-url", type=str, required=True, help="Base URL for answer generation model")
@@ -236,6 +247,55 @@ def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def build_report(args: argparse.Namespace, compared: list[dict[str, Any]]) -> dict[str, Any]:
+    stored_metrics = [x["stored_support_eval"] for x in compared if isinstance(x.get("stored_support_eval"), dict)]
+    firstk_metrics = [x["first_success_k_eval"] for x in compared if isinstance(x.get("first_success_k_eval"), dict)]
+    return {
+        "config": {
+            "analysis_json": str(args.analysis_json),
+            "answer_model": args.answer_model,
+            "answer_base_url": args.answer_base_url,
+            "judge_model": args.judge_model,
+            "judge_base_url": args.judge_base_url,
+            "answer_temperature": args.answer_temperature,
+            "judge_temperature": args.judge_temperature,
+            "max_retries": args.max_retries,
+            "entry_text_max_chars": args.entry_text_max_chars,
+        },
+        "summary": {
+            "stored_support_only": summarize(stored_metrics),
+            "first_success_k_entries": summarize(firstk_metrics),
+        },
+        "per_query": compared,
+    }
+
+
+def save_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def load_existing_sample_results(path: Path, sample_idx: int) -> list[dict[str, Any]] | None:
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    if not isinstance(payload, dict):
+        raise ValueError(f"Existing sample report is not a JSON object: {path}")
+    per_query = payload.get("per_query")
+    if not isinstance(per_query, list):
+        raise ValueError(f"Existing sample report has invalid 'per_query': {path}")
+    normalized: list[dict[str, Any]] = []
+    for item in per_query:
+        if not isinstance(item, dict):
+            continue
+        if int(item.get("sample_idx", sample_idx)) != sample_idx:
+            continue
+        normalized.append(item)
+    return normalized
+
+
 def main() -> None:
     args = parse_args()
     answer_api_key = args.answer_api_key or os.getenv("OPENAI_API_KEY")
@@ -261,96 +321,93 @@ def main() -> None:
     )
     judge_client = OpenAI(base_url=args.judge_base_url, api_key=judge_api_key)
 
-    compared: list[dict[str, Any]] = []
-    stored_metrics: list[dict[str, Any]] = []
-    firstk_metrics: list[dict[str, Any]] = []
-
+    results_by_sample: dict[int, list[dict[str, Any]]] = {}
     for item in results:
         if not isinstance(item, dict):
             continue
-        query = str(item.get("query", "")).strip()
-        gold = str(item.get("answer", "")).strip()
-        if not query or not gold:
+        sample_idx_raw = item.get("sample_idx")
+        if not isinstance(sample_idx_raw, int):
             continue
+        results_by_sample.setdefault(sample_idx_raw, []).append(item)
 
-        stored_entries = item.get("stored_support_set") or []
-        first_success_k = item.get("first_success_k")
-        firstk_entries: list[dict[str, Any]] = []
-        if isinstance(first_success_k, int):
-            for ev in item.get("k_evaluations", []):
-                if isinstance(ev, dict) and ev.get("k") == first_success_k:
-                    firstk_entries = ev.get("retrieved_entries") or []
-                    break
+    compared: list[dict[str, Any]] = []
+    per_sample_output_dir = args.per_sample_output_dir
+    if per_sample_output_dir is None:
+        per_sample_output_dir = args.output_json.parent / f"{args.output_json.stem}_samples"
 
-        row: dict[str, Any] = {
-            "sample_idx": item.get("sample_idx"),
-            "qa_idx": item.get("qa_idx"),
-            "category": item.get("category"),
-            "query": query,
-            "answer": gold,
-            "first_success_k": first_success_k,
-            "stored_support_entry_count": len(stored_entries),
-            "first_success_k_entry_count": len(firstk_entries),
-        }
+    for sample_idx in sorted(results_by_sample):
+        sample_output_path = per_sample_output_dir / f"locomo_support_answer_compare_sample_{sample_idx}.json"
+        if args.resume_per_sample:
+            existing_results = load_existing_sample_results(sample_output_path, sample_idx)
+            if existing_results is not None:
+                compared.extend(existing_results)
+                print(f"[Resume] skip sample {sample_idx}, loaded {len(existing_results)} records from: {sample_output_path}")
+                continue
 
-        if stored_entries:
-            stored_eval = evaluate_setting(
-                answer_generator=answer_generator,
-                judge_client=judge_client,
-                judge_model=args.judge_model,
-                query=query,
-                gold_answer=gold,
-                entries=stored_entries,
-                judge_temperature=args.judge_temperature,
-                max_retries=args.max_retries,
-                entry_text_max_chars=args.entry_text_max_chars,
-            )
-            row["stored_support_eval"] = stored_eval
-            stored_metrics.append(stored_eval)
-        else:
-            row["stored_support_eval"] = None
+        sample_compared: list[dict[str, Any]] = []
+        for item in results_by_sample[sample_idx]:
+            query = str(item.get("query", "")).strip()
+            gold = str(item.get("answer", "")).strip()
+            if not query or not gold:
+                continue
 
-        if firstk_entries:
-            firstk_eval = evaluate_setting(
-                answer_generator=answer_generator,
-                judge_client=judge_client,
-                judge_model=args.judge_model,
-                query=query,
-                gold_answer=gold,
-                entries=firstk_entries,
-                judge_temperature=args.judge_temperature,
-                max_retries=args.max_retries,
-                entry_text_max_chars=args.entry_text_max_chars,
-            )
-            row["first_success_k_eval"] = firstk_eval
-            firstk_metrics.append(firstk_eval)
-        else:
-            row["first_success_k_eval"] = None
+            stored_entries = item.get("stored_support_set") or []
+            first_success_k = item.get("first_success_k")
+            firstk_entries: list[dict[str, Any]] = []
+            if isinstance(first_success_k, int):
+                for ev in item.get("k_evaluations", []):
+                    if isinstance(ev, dict) and ev.get("k") == first_success_k:
+                        firstk_entries = ev.get("retrieved_entries") or []
+                        break
 
-        compared.append(row)
+            row: dict[str, Any] = {
+                "sample_idx": item.get("sample_idx"),
+                "qa_idx": item.get("qa_idx"),
+                "category": item.get("category"),
+                "query": query,
+                "answer": gold,
+                "first_success_k": first_success_k,
+                "stored_support_entry_count": len(stored_entries),
+                "first_success_k_entry_count": len(firstk_entries),
+            }
 
-    output = {
-        "config": {
-            "analysis_json": str(args.analysis_json),
-            "answer_model": args.answer_model,
-            "answer_base_url": args.answer_base_url,
-            "judge_model": args.judge_model,
-            "judge_base_url": args.judge_base_url,
-            "answer_temperature": args.answer_temperature,
-            "judge_temperature": args.judge_temperature,
-            "max_retries": args.max_retries,
-            "entry_text_max_chars": args.entry_text_max_chars,
-        },
-        "summary": {
-            "stored_support_only": summarize(stored_metrics),
-            "first_success_k_entries": summarize(firstk_metrics),
-        },
-        "per_query": compared,
-    }
+            if stored_entries:
+                row["stored_support_eval"] = evaluate_setting(
+                    answer_generator=answer_generator,
+                    judge_client=judge_client,
+                    judge_model=args.judge_model,
+                    query=query,
+                    gold_answer=gold,
+                    entries=stored_entries,
+                    judge_temperature=args.judge_temperature,
+                    max_retries=args.max_retries,
+                    entry_text_max_chars=args.entry_text_max_chars,
+                )
+            else:
+                row["stored_support_eval"] = None
 
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
-    with args.output_json.open("w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
+            if firstk_entries:
+                row["first_success_k_eval"] = evaluate_setting(
+                    answer_generator=answer_generator,
+                    judge_client=judge_client,
+                    judge_model=args.judge_model,
+                    query=query,
+                    gold_answer=gold,
+                    entries=firstk_entries,
+                    judge_temperature=args.judge_temperature,
+                    max_retries=args.max_retries,
+                    entry_text_max_chars=args.entry_text_max_chars,
+                )
+            else:
+                row["first_success_k_eval"] = None
+
+            sample_compared.append(row)
+
+        compared.extend(sample_compared)
+        save_json(sample_output_path, build_report(args, sample_compared))
+        print(f"[Done] sample report saved: {sample_output_path}")
+
+    save_json(args.output_json, build_report(args, compared))
 
     print(f"[Done] evaluated queries: {len(compared)}")
     print(f"[Done] output saved: {args.output_json}")
