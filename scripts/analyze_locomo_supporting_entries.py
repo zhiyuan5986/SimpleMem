@@ -243,6 +243,22 @@ def to_support_record(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def to_entry_cache_record(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "entry_id": e.get("entry_id"),
+            "lossless_restatement": e.get("lossless_restatement", ""),
+            "keywords": e.get("keywords", []),
+            "timestamp": e.get("timestamp"),
+            "location": e.get("location"),
+            "persons": e.get("persons", []),
+            "entities": e.get("entities", []),
+            "topic": e.get("topic"),
+        }
+        for e in entries
+    ]
+
+
 def entry_dict_to_model(entry: dict[str, Any]) -> "MemoryEntry":
     from models.memory_entry import MemoryEntry
 
@@ -362,6 +378,7 @@ def analyze_sample(
                 {
                     "k": k,
                     "retrieved_count": len(retrieved),
+                    "retrieved_entries": to_entry_cache_record(retrieved),
                     "can_answer": judge["can_answer"],
                     "judge_detail": {
                         "reason": judge["reason"],
