@@ -2,6 +2,7 @@
 LoComo10 Dataset Test for SimpleMem System
 Tests retrieval time, token usage, and answer quality
 """
+import os
 from pathlib import Path
 import time
 import json
@@ -31,7 +32,7 @@ except Exception as e:
 
 # Initialize SentenceTransformer model for semantic similarity
 try:
-    sentence_model = SentenceTransformer('/mnt/sdb/liuqiaoan/all-MiniLM-L6-v2')
+    sentence_model = SentenceTransformer('/mnt/sdb/liuqiaoan/all-MiniLM-L6-v2', device='cpu')
 except Exception as e:
     print(f"Warning: Could not load SentenceTransformer model: {e}")
     sentence_model = None
@@ -961,6 +962,11 @@ Return ONLY the JSON, no other text.
 
             # Test sample
             sample_results = self.test_sample(sample, sample_idx, enable_parallel_questions=enable_parallel_questions)
+            all_entries = self.system.vector_store.get_all_entries()
+            all_entries_dict = [entry.model_dump() for entry in all_entries]
+            os.makedirs(self.system.llm_client.model, exist_ok=True)
+            with open(f"{self.system.llm_client.model}/locomo10_sample_{sample_idx}_memory_entries.json", "w") as f:
+                json.dump(all_entries_dict, f, ensure_ascii=False, indent=4)
             all_results.extend(sample_results)
 
         # Calculate aggregate metrics
@@ -1006,7 +1012,7 @@ Return ONLY the JSON, no other text.
 
         # Save results
         if save_results:
-            output_file = result_file
+            output_file = f"{self.system.llm_client.model}/{result_file}"
             with open(output_file, 'w') as f:
                 json.dump({
                     'summary': {

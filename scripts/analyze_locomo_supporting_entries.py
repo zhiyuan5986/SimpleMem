@@ -281,8 +281,12 @@ def load_entries_into_system(system: "SimpleMemSystem", entries_raw: list[dict[s
         system.vector_store.add_entries(models)
 
 
-def retrieve_with_hybrid(system: "SimpleMemSystem", question: str, k: int) -> list[dict[str, Any]]:
+def retrieve(system: "SimpleMemSystem", question: str, k: int, enable_hybrid: bool = True) -> list[dict[str, Any]]:
     retriever = system.hybrid_retriever
+    if not enable_hybrid:
+        retriever.enable_planning = False
+    else:
+        retriever.enable_planning = True
     retriever.semantic_top_k = k
     retriever.keyword_top_k = k
     retriever.structured_top_k = k
@@ -345,7 +349,7 @@ def analyze_sample(
             "retrieval_issue": False,
         }
 
-        storage_pool = retrieve_with_hybrid(system, qa.question, storage_check_top_n)
+        storage_pool = retrieve(system, qa.question, storage_check_top_n, enable_hybrid=False)
         storage_judge = llm_judge_support(
             client=judge_client,
             model=judge_model,
@@ -362,7 +366,7 @@ def analyze_sample(
             item["stored_support_set"] = to_support_record(supporting)
 
         for k in k_values:
-            retrieved = retrieve_with_hybrid(system, qa.question, k)
+            retrieved = retrieve(system, qa.question, k)
             judge = llm_judge_support(
                 client=judge_client,
                 model=judge_model,
@@ -514,6 +518,7 @@ def main() -> None:
         api_key=api_key,
         model=args.model,
         base_url=args.base_url,
+        db_path=f"tmp/{args.model}",
         clear_db=True,
         enable_planning=not args.disable_planning,
         enable_reflection=not args.disable_reflection,
