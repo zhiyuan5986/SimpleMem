@@ -247,9 +247,44 @@ def summarize(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _first_success_k_distribution(items: list[dict[str, Any]]) -> dict[str, int]:
+    dist: dict[str, int] = {}
+    for item in items:
+        k = item.get("first_success_k")
+        if isinstance(k, int):
+            key = str(k)
+            dist[key] = dist.get(key, 0) + 1
+    return dict(sorted(dist.items(), key=lambda kv: int(kv[0])))
+
+
+
+
+def _summarize_by_category(paired_items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in paired_items:
+        category = str(item.get("category", "unknown"))
+        grouped.setdefault(category, []).append(item)
+
+    by_category: dict[str, dict[str, Any]] = {}
+    for category in sorted(grouped):
+        items = grouped[category]
+        by_category[category] = {
+            "count": len(items),
+            "stored_support_only": summarize([x["stored_support_eval"] for x in items]),
+            "first_success_k_entries": summarize([x["first_success_k_eval"] for x in items]),
+            "first_success_k_distribution": _first_success_k_distribution(items),
+        }
+    return by_category
+
+
 def build_report(args: argparse.Namespace, compared: list[dict[str, Any]]) -> dict[str, Any]:
-    stored_metrics = [x["stored_support_eval"] for x in compared if isinstance(x.get("stored_support_eval"), dict)]
-    firstk_metrics = [x["first_success_k_eval"] for x in compared if isinstance(x.get("first_success_k_eval"), dict)]
+    paired_items = [
+        x
+        for x in compared
+        if isinstance(x.get("stored_support_eval"), dict) and isinstance(x.get("first_success_k_eval"), dict)
+    ]
+    stored_metrics = [x["stored_support_eval"] for x in paired_items]
+    firstk_metrics = [x["first_success_k_eval"] for x in paired_items]
     return {
         "config": {
             "analysis_json": str(args.analysis_json),
@@ -263,8 +298,11 @@ def build_report(args: argparse.Namespace, compared: list[dict[str, Any]]) -> di
             "entry_text_max_chars": args.entry_text_max_chars,
         },
         "summary": {
+            "paired_count": len(paired_items),
             "stored_support_only": summarize(stored_metrics),
             "first_success_k_entries": summarize(firstk_metrics),
+            "first_success_k_distribution": _first_success_k_distribution(paired_items),
+            "by_category": _summarize_by_category(paired_items),
         },
         "per_query": compared,
     }
