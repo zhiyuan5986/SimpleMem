@@ -3,7 +3,7 @@
 
 This script reads the JSON produced by `analyze_locomo_supporting_entries.py` and evaluates two
 answering settings per query:
-1) only `stored_support_set`
+1) only `stored_support_set` (in latest analysis mode this is the minimal support set from first successful k)
 2) entries retrieved at `first_success_k`
 
 For each setting, it generates an answer with an LLM and computes metrics (including token F1),
