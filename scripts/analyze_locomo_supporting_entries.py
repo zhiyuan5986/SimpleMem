@@ -71,8 +71,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=0.0, help="LLM sampling temperature for judge call.")
     parser.add_argument("--max-retries", type=int, default=3, help="Retries per LLM judge call.")
     parser.add_argument("--entry-text-max-chars", type=int, default=400, help="Truncate each entry text in prompt.")
-    parser.add_argument("--storage-check-top-n", type=int, default=120, help="Large-k retrieval budget for storage-level check.")
-
     parser.add_argument("--disable-reflection", action="store_true", help="Disable retrieval reflection for deterministic behavior.")
     parser.add_argument("--disable-planning", action="store_true", help="Disable retrieval planning and use semantic fallback only.")
     return parser.parse_args()
@@ -331,7 +329,6 @@ def analyze_sample(
     temperature: float,
     max_retries: int,
     entry_text_max_chars: int,
-    storage_check_top_n: int,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
@@ -348,22 +345,6 @@ def analyze_sample(
             "first_success_k": None,
             "retrieval_issue": False,
         }
-
-        storage_pool = retrieve(system, qa.question, storage_check_top_n, enable_hybrid=False)
-        storage_judge = llm_judge_support(
-            client=judge_client,
-            model=judge_model,
-            question=qa.question,
-            answer=qa.answer,
-            entries=storage_pool,
-            temperature=temperature,
-            max_retries=max_retries,
-            entry_text_max_chars=entry_text_max_chars,
-        )
-        if storage_judge["can_answer"]:
-            supporting = [storage_pool[i] for i in storage_judge["minimal_supporting_entry_indices"]]
-            item["stored_support_exists"] = True
-            item["stored_support_set"] = to_support_record(supporting)
 
         for k in k_values:
             retrieved = retrieve(system, qa.question, k)
@@ -394,13 +375,13 @@ def analyze_sample(
             )
             if judge["can_answer"]:
                 item["first_success_k"] = k
+                item["stored_support_exists"] = True
+                item["stored_support_set"] = to_support_record(supporting)
                 break
 
         if item["first_success_k"] is None:
             item["retrieval_issue"] = True
-            item["failure_type"] = (
-                "retrieval_failed_within_k_budget" if item["stored_support_exists"] else "missing_or_insufficient_memory"
-            )
+            item["failure_type"] = "retrieval_failed_within_k_budget"
 
         results.append(item)
 
@@ -415,8 +396,6 @@ def summarize(all_results: list[dict[str, Any]]) -> dict[str, Any]:
     by_cat: dict[str, dict[str, int]] = {}
     success_count = 0
     retrieval_issue_count = 0
-    memory_missing_count = 0
-
     for r in all_results:
         cat = str(r["category"])
         by_cat.setdefault(cat, {"count": 0, "success": 0, "retrieval_issue": 0})
@@ -428,15 +407,16 @@ def summarize(all_results: list[dict[str, Any]]) -> dict[str, Any]:
         if r.get("retrieval_issue"):
             retrieval_issue_count += 1
             by_cat[cat]["retrieval_issue"] += 1
-        if r.get("failure_type") == "missing_or_insufficient_memory":
-            memory_missing_count += 1
 
     return {
         "total_queries": total,
         "success_count": success_count,
         "success_rate": success_count / total,
         "retrieval_issue_count": retrieval_issue_count,
-        "memory_missing_or_insufficient_count": memory_missing_count,
+        "memory_missing_or_insufficient_count": None,
+        "memory_missing_or_insufficient_count_note": (
+            "Not available in first-success-only mode because storage-level check is disabled."
+        ),
         "by_category": by_cat,
     }
 
@@ -464,7 +444,6 @@ def build_report(
                 "temperature": args.temperature,
                 "max_retries": args.max_retries,
                 "entry_text_max_chars": args.entry_text_max_chars,
-                "storage_check_top_n": args.storage_check_top_n,
             },
         },
         "missing_entry_files": missing_entry_files,
@@ -565,7 +544,6 @@ def main() -> None:
             temperature=args.temperature,
             max_retries=args.max_retries,
             entry_text_max_chars=args.entry_text_max_chars,
-            storage_check_top_n=args.storage_check_top_n,
         )
         all_results.extend(sample_results)
 
