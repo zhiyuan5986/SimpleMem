@@ -279,12 +279,8 @@ def load_entries_into_system(system: "SimpleMemSystem", entries_raw: list[dict[s
         system.vector_store.add_entries(models)
 
 
-def retrieve(system: "SimpleMemSystem", question: str, k: int, enable_hybrid: bool = True) -> list[dict[str, Any]]:
+def retrieve(system: "SimpleMemSystem", question: str, k: int) -> list[dict[str, Any]]:
     retriever = system.hybrid_retriever
-    if not enable_hybrid:
-        retriever.enable_planning = False
-    else:
-        retriever.enable_planning = True
     retriever.semantic_top_k = k
     retriever.keyword_top_k = k
     retriever.structured_top_k = k
