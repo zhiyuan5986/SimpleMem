@@ -7,7 +7,7 @@ Implements:
 - Sliding window processing for dialogue segmentation
 - Generates compact memory units with resolved coreferences and absolute timestamps
 """
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from models.memory_entry import MemoryEntry, Dialogue
 from utils.llm_client import LLMClient
 from database.vector_store import VectorStore
@@ -16,6 +16,7 @@ import json
 import asyncio
 import concurrent.futures
 from functools import partial
+import threading
 
 
 class MemoryBuilder:
@@ -54,6 +55,8 @@ class MemoryBuilder:
 
         # Previous window entries (for context)
         self.previous_entries: List[MemoryEntry] = []
+        self.extraction_trace: List[Dict[str, Any]] = []
+        self._trace_lock = threading.Lock()
 
     def add_dialogue(self, dialogue: Dialogue, auto_process: bool = True):
         """
@@ -173,14 +176,17 @@ class MemoryBuilder:
         Φ_gate(W) → {m_k}, generates compact memory units from dialogue window
         """
         # Build dialogue text
-        dialogue_text = "\n".join([str(d) for d in dialogues])
+        dialogue_context = [str(d) for d in dialogues]
+        dialogue_text = "\n".join(dialogue_context)
         dialogue_ids = [d.dialogue_id for d in dialogues]
 
         # Build context
         context = ""
+        context_entries = []
         if self.previous_entries:
             context = "\n[Previous Window Memory Entries (for reference to avoid duplication)]\n"
             for entry in self.previous_entries[:3]:  # Only show first 3
+                context_entries.append(entry.lossless_restatement)
                 context += f"- {entry.lossless_restatement}\n"
 
         # Build prompt
@@ -215,6 +221,7 @@ class MemoryBuilder:
 
                 # Parse response
                 entries = self._parse_llm_response(response, dialogue_ids)
+                self._record_extraction_trace(dialogue_context, context_entries, entries)
                 return entries
 
             except Exception as e:
@@ -381,13 +388,16 @@ Now process the above dialogues. Return ONLY the JSON array, no other explanatio
         print(f"[Worker {window_num}] Processing {batch_type} with {batch_size} dialogues")
         
         # Build dialogue text
-        dialogue_text = "\n".join([str(d) for d in window])
+        dialogue_context = [str(d) for d in window]
+        dialogue_text = "\n".join(dialogue_context)
         
         # Build context (shared across all workers - this is fine for parallel processing)
         context = ""
+        context_entries = []
         if self.previous_entries:
             context = "\n[Previous Window Memory Entries (for reference to avoid duplication)]\n"
             for entry in self.previous_entries[:3]:  # Only show first 3
+                context_entries.append(entry.lossless_restatement)
                 context += f"- {entry.lossless_restatement}\n"
 
         # Build prompt
@@ -422,6 +432,7 @@ Now process the above dialogues. Return ONLY the JSON array, no other explanatio
 
                 # Parse response
                 entries = self._parse_llm_response(response, dialogue_ids)
+                self._record_extraction_trace(dialogue_context, context_entries, entries)
                 print(f"[Worker {window_num}] Generated {len(entries)} entries")
                 return entries
 
@@ -431,3 +442,28 @@ Now process the above dialogues. Return ONLY the JSON array, no other explanatio
                 else:
                     print(f"[Worker {window_num}] All {max_retries} attempts failed: {e}")
                     return []
+
+    def _record_extraction_trace(
+        self,
+        dialogue_context: List[str],
+        context_entries: List[str],
+        entries: List[MemoryEntry]
+    ):
+        """Record prompt inputs and extraction outputs for traceability."""
+        trace_item = {
+            "dialogue_context": dialogue_context,
+            "context": context_entries,
+            "extracted_entries": [entry.lossless_restatement for entry in entries]
+        }
+        with self._trace_lock:
+            self.extraction_trace.append(trace_item)
+
+    def reset_extraction_trace(self):
+        """Reset extraction trace records."""
+        with self._trace_lock:
+            self.extraction_trace = []
+
+    def get_extraction_trace(self) -> List[Dict[str, Any]]:
+        """Get a snapshot of extraction trace records."""
+        with self._trace_lock:
+            return list(self.extraction_trace)

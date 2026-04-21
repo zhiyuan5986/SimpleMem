@@ -22,6 +22,7 @@ from sentence_transformers.util import pytorch_cos_sim
 
 from main import SimpleMemSystem
 from models.memory_entry import Dialogue
+from database.vector_store import VectorStore
 
 # Download required NLTK data
 try:
@@ -954,19 +955,37 @@ Return ONLY the JSON, no other text.
         total_samples = len(samples)
 
         all_results = []
+        model_output_dir = Path(self.system.llm_client.model)
+        model_output_dir.mkdir(parents=True, exist_ok=True)
+
+        base_db_path = Path(self.system.vector_store.db_path)
+        table_name = self.system.vector_store.table_name
 
         # Test each sample
         for sample_idx, sample in enumerate(samples):
-            # Clear system for each sample
-            self.system.vector_store.clear()
+            sample_db_path = base_db_path / f"locomo10_sample_{sample_idx}"
+            sample_vector_store = VectorStore(
+                db_path=str(sample_db_path),
+                embedding_model=self.system.embedding_model,
+                table_name=table_name
+            )
+            self.system.vector_store = sample_vector_store
+            self.system.memory_builder.vector_store = sample_vector_store
+            self.system.hybrid_retriever.vector_store = sample_vector_store
+            self.system.memory_builder.previous_entries = []
+            self.system.memory_builder.dialogue_buffer = []
+            self.system.memory_builder.processed_count = 0
+            self.system.memory_builder.reset_extraction_trace()
 
             # Test sample
             sample_results = self.test_sample(sample, sample_idx, enable_parallel_questions=enable_parallel_questions)
             all_entries = self.system.vector_store.get_all_entries()
             all_entries_dict = [entry.model_dump() for entry in all_entries]
-            os.makedirs(self.system.llm_client.model, exist_ok=True)
-            with open(f"{self.system.llm_client.model}/locomo10_sample_{sample_idx}_memory_entries.json", "w") as f:
+            with open(model_output_dir / f"locomo10_sample_{sample_idx}_memory_entries.json", "w") as f:
                 json.dump(all_entries_dict, f, ensure_ascii=False, indent=4)
+            extraction_trace = self.system.memory_builder.get_extraction_trace()
+            with open(model_output_dir / f"locomo10_sample_{sample_idx}_extraction_trace.json", "w") as f:
+                json.dump(extraction_trace, f, ensure_ascii=False, indent=4)
             all_results.extend(sample_results)
 
         # Calculate aggregate metrics
@@ -1012,7 +1031,7 @@ Return ONLY the JSON, no other text.
 
         # Save results
         if save_results:
-            output_file = f"{self.system.llm_client.model}/{result_file}"
+            output_file = str(model_output_dir / result_file)
             with open(output_file, 'w') as f:
                 json.dump({
                     'summary': {
