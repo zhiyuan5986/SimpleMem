@@ -2,22 +2,20 @@
 """Coarse-to-fine LongLLMLingua filtering over SimpleMem extraction traces.
 
 Given a ``*_extraction_trace.json`` produced by ``test_locomo10.py``, this script:
-1. Treats each ``dialogue_context`` item as one document.
-2. For every extracted entry, uses PPL-based coarse ranking to keep top-k documents.
-3. Runs LongLLMLingua token-level compression on the selected top-k documents.
-
-Compared with stock LongLLMLingua usage, this script provides:
-- explicit coarse top-k by PPL before token-level filtering;
-- flexible question conditioning with user-provided condition text placement.
+1. Groups adjacent dialogue turns into coarse windows.
+2. For every extracted entry, uses PPL-based coarse ranking over turn windows.
+3. Takes coarse top-1 window and runs token-level contrastive filtering with a budget.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
+import torch
 from llmlingua import PromptCompressor
 
 
@@ -39,6 +37,25 @@ class TopKPPLPromptCompressor(PromptCompressor):
         if condition_placement == "append":
             return f"{question}\n{condition_text}" if question else condition_text
         raise ValueError(f"Unknown condition placement: {condition_placement}")
+
+    @staticmethod
+    def build_turn_windows(context: list[str], window_k: int, turn_sep: str) -> list[dict[str, Any]]:
+        if window_k <= 0:
+            raise ValueError("window_k must be positive")
+        windows: list[dict[str, Any]] = []
+        for start in range(0, len(context), window_k):
+            end = min(start + window_k, len(context))
+            turns = [str(t) for t in context[start:end]]
+            windows.append(
+                {
+                    "window_index": len(windows),
+                    "turn_start": start,
+                    "turn_end_exclusive": end,
+                    "turn_indices": list(range(start, end)),
+                    "text": turn_sep.join(turns),
+                }
+            )
+        return windows
 
     def get_condition_ppl_flexible(
         self,
@@ -105,6 +122,76 @@ class TopKPPLPromptCompressor(PromptCompressor):
         keep_n = min(max(top_k, 1), len(context))
         return ranked_indices[:keep_n], ppl_values
 
+    def token_level_contrastive_compress(
+        self,
+        context_text: str,
+        entry_text: str,
+        condition_text: str,
+        condition_placement: str,
+        budget_multiplier: float,
+    ) -> dict[str, Any]:
+        effective_question = self.build_effective_question(
+            question=entry_text,
+            condition_text=condition_text,
+            condition_placement=condition_placement,
+        )
+
+        tokenized_text = self.tokenizer(context_text, return_tensors="pt")
+        input_ids = tokenized_text["input_ids"].to(self.device)
+        text_tokens = self.tokenizer.convert_ids_to_tokens(input_ids[0])
+
+        if input_ids.shape[1] <= 1:
+            return {
+                "compressed_prompt": context_text,
+                "origin_tokens": int(input_ids.shape[1]),
+                "compressed_tokens": int(input_ids.shape[1]),
+                "ratio": 1.0,
+                "contrastive_token_scores": [],
+                "selected_token_positions": list(range(int(input_ids.shape[1]))),
+            }
+
+        plain_loss = self.get_ppl(context_text, granularity="token")
+
+        if effective_question:
+            q_ids = self.tokenizer(effective_question, return_tensors="pt")["input_ids"].to(self.device)
+            combined_ids = torch.cat([q_ids, input_ids], dim=1)
+            combined_attention = torch.ones_like(combined_ids)
+            cond_loss = self.get_ppl(
+                text="",
+                granularity="token",
+                input_ids=combined_ids,
+                attention_mask=combined_attention,
+                condition_mode="after",
+                condition_pos_id=q_ids.shape[1] - 1,
+            )
+            cond_text_loss = cond_loss[: plain_loss.shape[0]]
+        else:
+            cond_text_loss = plain_loss
+
+        contrastive = (cond_text_loss - plain_loss).detach().cpu()
+
+        entry_tokens = max(self.get_token_length(entry_text), 1)
+        budget = max(1, int(math.ceil(entry_tokens * budget_multiplier)))
+        available = int(plain_loss.shape[0])
+        keep_n = min(budget, available)
+
+        top_positions = torch.argsort(contrastive, descending=True)[:keep_n].tolist()
+        selected_positions = sorted(top_positions)
+
+        selected_tokens = [text_tokens[pos + 1] for pos in selected_positions]
+        compressed_prompt = self.tokenizer.convert_tokens_to_string(selected_tokens)
+
+        return {
+            "compressed_prompt": compressed_prompt,
+            "origin_tokens": int(input_ids.shape[1]),
+            "compressed_tokens": len(selected_tokens),
+            "ratio": (len(selected_tokens) / max(int(input_ids.shape[1]), 1)),
+            "contrastive_token_scores": [float(contrastive[pos].item()) for pos in selected_positions],
+            "selected_token_positions": selected_positions,
+            "effective_question": effective_question,
+            "entry_token_budget": budget,
+        }
+
     def compress_with_coarse_topk(
         self,
         context: list[str],
@@ -113,59 +200,63 @@ class TopKPPLPromptCompressor(PromptCompressor):
         condition_in_question: str,
         condition_text: str,
         condition_placement: str,
-        instruction: str,
-        rate: float,
-        target_token: float,
-        iterative_size: int,
-        use_sentence_level_filter: bool,
-        use_token_level_filter: bool,
-        keep_split: bool,
-        token_budget_ratio: float,
-        force_context_ids: list[int] | None,
+        turn_window_k: int,
+        turn_separator: str,
+        entry_budget_multiplier: float,
     ) -> dict[str, Any]:
+        turn_windows = self.build_turn_windows(context=context, window_k=turn_window_k, turn_sep=turn_separator)
+        window_texts = [w["text"] for w in turn_windows]
+
         chosen_indices, ppl_values = self.coarse_topk_by_ppl(
-            context=context,
+            context=window_texts,
             question=entry_text,
             top_k=top_k,
             condition_in_question=condition_in_question,
             condition_text=condition_text,
             condition_placement=condition_placement,
         )
-        chosen_context = [context[i] for i in chosen_indices]
 
-        effective_question = self.build_effective_question(
-            question=entry_text,
+        if not chosen_indices:
+            return {
+                "chosen_doc_indices": [],
+                "chosen_doc_ppl": [],
+                "chosen_windows": [],
+                "effective_question": self.build_effective_question(entry_text, condition_text, condition_placement),
+                "original_question": entry_text,
+                "compressed_prompt": "",
+                "origin_tokens": 0,
+                "compressed_tokens": 0,
+                "ratio": 0.0,
+                "entry_token_budget": 0,
+                "selected_token_positions": [],
+                "contrastive_token_scores": [],
+            }
+
+        top1_idx = chosen_indices[0]
+        top1_window = turn_windows[top1_idx]
+
+        fine = self.token_level_contrastive_compress(
+            context_text=top1_window["text"],
+            entry_text=entry_text,
             condition_text=condition_text,
             condition_placement=condition_placement,
+            budget_multiplier=entry_budget_multiplier,
         )
 
-        compression = super().compress_prompt(
-            context=chosen_context,
-            instruction=instruction,
-            question=effective_question,
-            rate=rate,
-            target_token=target_token,
-            iterative_size=iterative_size,
-            force_context_ids=force_context_ids,
-            use_sentence_level_filter=use_sentence_level_filter,
-            use_context_level_filter=False,
-            use_token_level_filter=use_token_level_filter,
-            keep_split=keep_split,
-            token_budget_ratio=token_budget_ratio,
-            condition_in_question="none",
-            rank_method="llmlingua",
-        )
-
-        compression["chosen_doc_indices"] = chosen_indices
-        compression["chosen_doc_ppl"] = [ppl_values[i] for i in chosen_indices]
-        compression["effective_question"] = effective_question
-        compression["original_question"] = entry_text
-        return compression
+        return {
+            **fine,
+            "chosen_doc_indices": chosen_indices,
+            "chosen_doc_ppl": [ppl_values[i] for i in chosen_indices],
+            "chosen_windows": [turn_windows[i] for i in chosen_indices],
+            "coarse_top1_window": top1_window,
+            "original_question": entry_text,
+            "effective_question": fine["effective_question"],
+        }
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Coarse top-k + fine token-level LongLLMLingua filtering for extraction traces."
+        description="Coarse turn-window top-k + fine token-level contrastive LongLLMLingua filtering for extraction traces."
     )
     parser.add_argument("--trace-json", type=Path, required=True, help="Path to *_extraction_trace.json")
     parser.add_argument("--output-json", type=Path, required=True, help="Path to save filtered output JSON")
@@ -183,18 +274,21 @@ def parse_args() -> argparse.Namespace:
         help="Device map for PromptCompressor (e.g., cuda, cpu, auto)",
     )
 
-    parser.add_argument("--top-k", type=int, default=5, help="Number of dialogue_context docs kept by coarse PPL ranking")
-    parser.add_argument("--instruction", type=str, default="", help="Optional instruction passed to compressor")
-    parser.add_argument("--rate", type=float, default=0.5, help="Compression rate target")
-    parser.add_argument("--target-token", type=float, default=-1, help="Optional target token budget, -1 to disable")
-    parser.add_argument("--iterative-size", type=int, default=200, help="Iterative compression chunk size")
-    parser.add_argument("--token-budget-ratio", type=float, default=1.4, help="Sentence-level budget ratio")
+    parser.add_argument("--top-k", type=int, default=1, help="Number of coarse turn windows kept by PPL ranking")
+    parser.add_argument("--turn-window-k", type=int, default=2, help="Number of adjacent turns merged into one coarse window")
+    parser.add_argument("--turn-separator", type=str, default="\n", help="Separator used to concatenate turns in each coarse window")
+    parser.add_argument(
+        "--entry-token-budget-multiplier",
+        type=float,
+        default=1.0,
+        help="Fine-stage token budget multiplier relative to entry token length",
+    )
 
     parser.add_argument(
         "--condition-in-question",
         choices=["none", "before", "after"],
         default="after",
-        help="Conditioning mode used in PPL computation",
+        help="Conditioning mode used in coarse PPL computation",
     )
     parser.add_argument(
         "--condition-text",
@@ -208,10 +302,6 @@ def parse_args() -> argparse.Namespace:
         default="prepend",
         help="Where to place condition_text relative to question",
     )
-
-    parser.add_argument("--use-sentence-level-filter", action="store_true", help="Enable sentence-level filtering in fine stage")
-    parser.add_argument("--disable-token-level-filter", action="store_true", help="Disable token-level filtering in fine stage")
-    parser.add_argument("--keep-split", action="store_true", help="Keep original separators")
 
     parser.add_argument("--max-trace-items", type=int, default=-1, help="Only process first N trace items, -1 for all")
     parser.add_argument("--max-entries-per-item", type=int, default=-1, help="Only process first N extracted entries per trace item")
@@ -257,29 +347,26 @@ def main() -> None:
                 condition_in_question=args.condition_in_question,
                 condition_text=args.condition_text,
                 condition_placement=args.condition_placement,
-                instruction=args.instruction,
-                rate=args.rate,
-                target_token=args.target_token,
-                iterative_size=args.iterative_size,
-                use_sentence_level_filter=args.use_sentence_level_filter,
-                use_token_level_filter=not args.disable_token_level_filter,
-                keep_split=args.keep_split,
-                token_budget_ratio=args.token_budget_ratio,
-                force_context_ids=None,
+                turn_window_k=args.turn_window_k,
+                turn_separator=args.turn_separator,
+                entry_budget_multiplier=args.entry_token_budget_multiplier,
             )
             entry_results.append(
                 {
                     "entry_index": entry_idx,
                     "entry_text": entry_text,
                     "coarse_topk_indices": res["chosen_doc_indices"],
-                    "coarse_topk_docs": [context[i] for i in res["chosen_doc_indices"]],
+                    "coarse_topk_windows": res["chosen_windows"],
                     "coarse_topk_ppl": res["chosen_doc_ppl"],
+                    "coarse_top1_window": res.get("coarse_top1_window", {}),
                     "effective_question": res["effective_question"],
                     "compressed_prompt": res["compressed_prompt"],
                     "origin_tokens": res["origin_tokens"],
                     "compressed_tokens": res["compressed_tokens"],
                     "ratio": res["ratio"],
-                    "rate": res["rate"],
+                    "entry_token_budget": res["entry_token_budget"],
+                    "selected_token_positions": res["selected_token_positions"],
+                    "contrastive_token_scores": res["contrastive_token_scores"],
                 }
             )
 
@@ -298,16 +385,12 @@ def main() -> None:
             "model_name": args.model_name,
             "device_map": args.device_map,
             "top_k": args.top_k,
-            "instruction": args.instruction,
-            "rate": args.rate,
-            "target_token": args.target_token,
-            "iterative_size": args.iterative_size,
+            "turn_window_k": args.turn_window_k,
+            "turn_separator": args.turn_separator,
+            "entry_token_budget_multiplier": args.entry_token_budget_multiplier,
             "condition_in_question": args.condition_in_question,
             "condition_text": args.condition_text,
             "condition_placement": args.condition_placement,
-            "use_sentence_level_filter": args.use_sentence_level_filter,
-            "use_token_level_filter": not args.disable_token_level_filter,
-            "keep_split": args.keep_split,
             "max_trace_items": args.max_trace_items,
             "max_entries_per_item": args.max_entries_per_item,
         },
