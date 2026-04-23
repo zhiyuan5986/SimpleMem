@@ -43,7 +43,14 @@ class TopKPPLPromptCompressor(PromptCompressor):
         if window_k <= 0:
             raise ValueError("window_k must be positive")
         windows: list[dict[str, Any]] = []
-        for start in range(0, len(context), window_k):
+        # Build stride-1 sliding windows, e.g. k=3 -> [0,1,2], [1,2,3], ...
+        # If context is shorter than window_k, keep a single short window.
+        if len(context) <= window_k:
+            starts = [0] if context else []
+        else:
+            starts = range(0, len(context) - window_k + 1)
+
+        for start in starts:
             end = min(start + window_k, len(context))
             turns = [str(t) for t in context[start:end]]
             windows.append(
