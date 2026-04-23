@@ -18,8 +18,9 @@ python scripts/filter_extraction_trace_longllmlingua_laquer.py \
   --top-k 1 \
   --turn-window-k 3 \
   --condition-in-question after \
-  --condition-placement none \
+  --condition-text "Please focus on facts related to this memory entry." \
+  --condition-placement prepend \
   --model $model_name \
-  --first-stage-filter fine_topk_by_contrastive_ppl
+  # --first-stage-filter fine_topk_by_contrastive_ppl
   # --api-key $api_key \
   # --base-url $base_url \
