@@ -122,6 +122,52 @@ class TopKPPLPromptCompressor(PromptCompressor):
         keep_n = min(max(top_k, 1), len(context))
         return ranked_indices[:keep_n], ppl_values
 
+    def fine_topk_by_contrastive_ppl(
+        self,
+        context: list[str],
+        question: str,
+        top_k: int,
+        condition_text: str,
+        condition_placement: str,
+    ) -> tuple[list[int], list[float]]:
+        """Rank docs by mean token-level contrastive PPL (lower is better)."""
+        if not context:
+            return [], []
+
+        effective_question = self.build_effective_question(
+            question=question,
+            condition_text=condition_text,
+            condition_placement=condition_placement,
+        )
+
+        score_values: list[float] = []
+        for doc in context:
+            plain_loss = self.get_ppl(doc, granularity="token")
+
+            if effective_question:
+                q_ids = self.tokenizer(effective_question, return_tensors="pt")["input_ids"].to(self.device)
+                doc_ids = self.tokenizer(doc, return_tensors="pt")["input_ids"].to(self.device)
+                combined_ids = torch.cat([q_ids, doc_ids], dim=1)
+                combined_attention = torch.ones_like(combined_ids)
+                cond_loss = self.get_ppl(
+                    text="",
+                    granularity="token",
+                    input_ids=combined_ids,
+                    attention_mask=combined_attention,
+                    condition_mode="after",
+                    condition_pos_id=q_ids.shape[1] - 1,
+                )
+                cond_doc_loss = cond_loss[: plain_loss.shape[0]]
+            else:
+                cond_doc_loss = plain_loss
+
+            contrastive = (cond_doc_loss - plain_loss).detach().cpu()
+            score_values.append(float(torch.mean(contrastive).item()))
+
+        ranked_indices = sorted(range(len(context)), key=lambda idx: score_values[idx])
+        keep_n = min(max(top_k, 1), len(context))
+        return ranked_indices[:keep_n], score_values
+
     def token_level_contrastive_compress(
         self,
         context_text: str,
@@ -203,18 +249,32 @@ class TopKPPLPromptCompressor(PromptCompressor):
         turn_window_k: int,
         turn_separator: str,
         entry_budget_multiplier: float,
+        first_stage_filter: str = "coarse_topk_by_ppl",
     ) -> dict[str, Any]:
         turn_windows = self.build_turn_windows(context=context, window_k=turn_window_k, turn_sep=turn_separator)
         window_texts = [w["text"] for w in turn_windows]
 
-        chosen_indices, ppl_values = self.coarse_topk_by_ppl(
-            context=window_texts,
-            question=entry_text,
-            top_k=top_k,
-            condition_in_question=condition_in_question,
-            condition_text=condition_text,
-            condition_placement=condition_placement,
-        )
+        if first_stage_filter == "coarse_topk_by_ppl":
+            chosen_indices, ppl_values = self.coarse_topk_by_ppl(
+                context=window_texts,
+                question=entry_text,
+                top_k=top_k,
+                condition_in_question=condition_in_question,
+                condition_text=condition_text,
+                condition_placement=condition_placement,
+            )
+        elif first_stage_filter == "fine_topk_by_contrastive_ppl":
+            chosen_indices, ppl_values = self.fine_topk_by_contrastive_ppl(
+                context=window_texts,
+                question=entry_text,
+                top_k=top_k,
+                condition_text=condition_text,
+                condition_placement=condition_placement,
+            )
+        else:
+            raise ValueError(
+                f"first_stage_filter must be one of [coarse_topk_by_ppl, fine_topk_by_contrastive_ppl], got {first_stage_filter}"
+            )
 
         if not chosen_indices:
             return {
