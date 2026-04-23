@@ -175,7 +175,7 @@ class TopKPPLPromptCompressor(PromptCompressor):
         available = int(plain_loss.shape[0])
         keep_n = min(budget, available)
 
-        top_positions = torch.argsort(contrastive, descending=True)[:keep_n].tolist()
+        top_positions = torch.argsort(contrastive, descending=False)[:keep_n].tolist()
         selected_positions = sorted(top_positions)
 
         selected_tokens = [text_tokens[pos + 1] for pos in selected_positions]

@@ -24,53 +24,54 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.filter_extraction_trace_longllmlingua import TopKPPLPromptCompressor, load_trace
+from src.laquer_methods.llm_method import LLMBasedAlignment  # type: ignore
 
-try:
-    from laquer_methods.llm_method import LLMBasedAlignment  # type: ignore
-except Exception:  # pragma: no cover - fallback when LAQuer source is not installed
+# try:
+#     from src.laquer_methods.llm_method import LLMBasedAlignment  # type: ignore
+# except Exception:  # pragma: no cover - fallback when LAQuer source is not installed
 
-    class LLMBasedAlignment:  # type: ignore[override]
-        """Small compatibility base class mirroring LAQuer's LLM alignment role."""
+#     class LLMBasedAlignment:  # type: ignore[override]
+#         """Small compatibility base class mirroring LAQuer's LLM alignment role."""
 
-        def __init__(self, model_name: str, client: OpenAI, temperature: float = 0.0, max_tokens: int = 800):
-            self.model_name = model_name
-            self.client = client
-            self.temperature = temperature
-            self.max_tokens = max_tokens
+#         def __init__(self, model_name: str, client: OpenAI, temperature: float = 0.0, max_tokens: int = 800):
+#             self.model_name = model_name
+#             self.client = client
+#             self.temperature = temperature
+#             self.max_tokens = max_tokens
 
-        def build_prompt(self, query: str, context_turns: list[dict[str, Any]]) -> str:
-            raise NotImplementedError
+#         def build_prompt(self, query: str, context_turns: list[dict[str, Any]]) -> str:
+#             raise NotImplementedError
 
-        def call_llm(self, prompt: str) -> str:
-            resp = self.client.chat.completions.create(
-                model=self.model_name,
-                temperature=self.temperature,
-                max_tokens=self.max_tokens,
-                response_format={"type": "json_object"},
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are a careful evidence span extractor. Output valid JSON only.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            return (resp.choices[0].message.content or "").strip()
+#         def call_llm(self, prompt: str) -> str:
+#             resp = self.client.chat.completions.create(
+#                 model=self.model_name,
+#                 temperature=self.temperature,
+#                 max_tokens=self.max_tokens,
+#                 response_format={"type": "json_object"},
+#                 messages=[
+#                     {
+#                         "role": "system",
+#                         "content": "You are a careful evidence span extractor. Output valid JSON only.",
+#                     },
+#                     {"role": "user", "content": prompt},
+#                 ],
+#             )
+#             return (resp.choices[0].message.content or "").strip()
 
-        def parse_response(self, response_text: str) -> list[dict[str, Any]]:
-            try:
-                obj = json.loads(response_text)
-            except json.JSONDecodeError:
-                m = re.search(r"\{[\s\S]*\}", response_text)
-                if not m:
-                    return []
-                obj = json.loads(m.group(0))
-            spans = obj.get("spans", []) if isinstance(obj, dict) else []
-            return spans if isinstance(spans, list) else []
+#         def parse_response(self, response_text: str) -> list[dict[str, Any]]:
+#             try:
+#                 obj = json.loads(response_text)
+#             except json.JSONDecodeError:
+#                 m = re.search(r"\{[\s\S]*\}", response_text)
+#                 if not m:
+#                     return []
+#                 obj = json.loads(m.group(0))
+#             spans = obj.get("spans", []) if isinstance(obj, dict) else []
+#             return spans if isinstance(spans, list) else []
 
-        def align(self, query: str, context_turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            prompt = self.build_prompt(query=query, context_turns=context_turns)
-            return self.parse_response(self.call_llm(prompt))
+#         def align(self, query: str, context_turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+#             prompt = self.build_prompt(query=query, context_turns=context_turns)
+#             return self.parse_response(self.call_llm(prompt))
 
 
 @dataclass
@@ -88,7 +89,7 @@ class LoCoMoLAQuerAlignment(LLMBasedAlignment):
     def build_prompt(self, query: str, context_turns: list[dict[str, Any]]) -> str:
         examples = self._few_shot_examples()
         context_block = "\n".join(
-            f"[Turn {t['turn_index']}] {t['speaker']}: {t['text']}" for t in context_turns
+            f"[Turn {idx}] {t}" for idx, t in enumerate(context_turns)
         )
         return (
             "Task: Given one extracted memory entry and a dialogue snippet, find minimal supporting spans.\n"
@@ -110,16 +111,16 @@ class LoCoMoLAQuerAlignment(LLMBasedAlignment):
             "Example 1\n"
             "Entry: Alex's flight to Seattle is on Friday morning.\n"
             "Dialogue:\n"
-            "[Turn 0] User: I finally booked my Seattle trip; the flight is this Friday at 8 a.m.\n"
-            "[Turn 1] Friend: Nice, hope the weather is good.\n"
+            "[Turn 0] [1:36 pm on 3 July, 2023] User: I finally booked my Seattle trip; the flight is this Friday at 8 a.m.\n"
+            "[Turn 1] [1:36 pm on 3 July, 2023] Friend: Nice, hope the weather is good.\n"
             "Output:\n"
             "{\"spans\":[{\"turn_index\":0,\"span_text\":\"Seattle trip; the flight is this Friday at 8 a.m.\","
             "\"reason\":\"States destination and time\",\"confidence\":0.96}]}\n\n"
             "Example 2\n"
             "Entry: Mia moved to Chicago last year.\n"
             "Dialogue:\n"
-            "[Turn 0] Mia: I'm still in Austin for now.\n"
-            "[Turn 1] Mia: I might move someday, but no plans.\n"
+            "[Turn 0] [1:36 pm on 3 July, 2023] User: I'm still in Austin for now.\n"
+            "[Turn 1] [1:36 pm on 3 July, 2023] Mia: I might move someday, but no plans.\n"
             "Output:\n"
             "{\"spans\":[]}"
         )
@@ -297,6 +298,7 @@ def main() -> None:
                     "num_llm_spans": len(spans),
                 }
             )
+            print(entry_results[-1])
 
         results.append(
             {
