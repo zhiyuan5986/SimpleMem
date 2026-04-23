@@ -1,0 +1,11 @@
+python scripts/filter_extraction_trace_longllmlingua.py \
+  --trace-json /home/liuqiaoan/Documents/SimpleMem/deepseek-chat/locomo10_sample_0_extraction_trace.json \
+  --output-json /home/liuqiaoan/Documents/SimpleMem/deepseek-chat/locomo10_sample_0_longllmlingua_filtered.json \
+  --model-name /mnt/sdb/liuqiaoan/gpt2-dolly \
+  --device-map cuda \
+  --top-k 1 \
+  --entry-token-budget-multiplier 1.1 \
+  --turn-window-k 3 \
+  --condition-in-question after \
+  --condition-text "Please focus on facts related to this memory entry." \
+  --condition-placement prepend

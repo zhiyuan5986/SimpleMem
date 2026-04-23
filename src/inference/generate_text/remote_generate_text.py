@@ -1,6 +1,7 @@
 
 from typing import List
 import logging
+import os
 
 
 from litellm import completion
@@ -16,7 +17,9 @@ def remote_generate_text(model: str, messages: List[dict]):
     logger.debug("generating text")
     
     response = completion(
-        model=model,
+        model=f"openai/{model}",
+        base_url=os.getenv("OPENAI_BASE_URL"),
+        api_key=os.getenv("OPENAI_API_KEY"),
         messages=messages,
         max_tokens=1024    
     )

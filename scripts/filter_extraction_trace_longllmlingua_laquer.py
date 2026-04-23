@@ -190,7 +190,7 @@ def main() -> None:
                     "num_llm_spans": len(spans),
                 }
             )
-            print(entry_results[-1])
+            print(json.dumps(entry_results[-1], ensure_ascii=False, indent=2))
 
         results.append(
             {

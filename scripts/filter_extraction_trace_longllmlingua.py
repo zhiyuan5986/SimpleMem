@@ -164,7 +164,7 @@ class TopKPPLPromptCompressor(PromptCompressor):
             contrastive = (cond_doc_loss - plain_loss).detach().cpu()
             score_values.append(float(torch.mean(contrastive).item()))
 
-        ranked_indices = sorted(range(len(context)), key=lambda idx: score_values[idx])
+        ranked_indices = sorted(range(len(context)), key=lambda idx: score_values[idx], reverse=True)
         keep_n = min(max(top_k, 1), len(context))
         return ranked_indices[:keep_n], score_values
 
