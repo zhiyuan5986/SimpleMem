@@ -57,25 +57,33 @@ def normalize_spans(rows: list[dict[str, Any]], context_turns: list[dict[str, An
     source_map = {f"turn_{turn['turn_index']}": turn for turn in context_turns}
     normalized: list[dict[str, Any]] = []
 
+    def _parse_first_offset(raw_offsets: Any) -> tuple[int, int]:
+        if not isinstance(raw_offsets, list) or len(raw_offsets) == 0:
+            return -1, -1
+        first = raw_offsets[0]
+        if isinstance(first, (list, tuple)) and len(first) == 2:
+            try:
+                return int(first[0]), int(first[1])
+            except (TypeError, ValueError):
+                return -1, -1
+        return -1, -1
+
     for row in rows:
         source_id = str(row.get("documentFile", ""))
         turn = source_map.get(source_id)
         if not turn:
             continue
 
-        doc_offsets = row.get("docSpanOffsets", [])
-        offset = doc_offsets[0] if isinstance(doc_offsets, list) and len(doc_offsets) > 0 else [-1, -1]
-        if not isinstance(offset, list) or len(offset) != 2:
-            offset = [-1, -1]
+        offset_start, offset_end = _parse_first_offset(row.get("docSpanOffsets", []))
 
         normalized.append(
             {
                 "turn_index": turn["turn_index"],
                 "speaker": turn["speaker"],
                 "span_text": str(row.get("docSpanText", "")).strip(),
-                "char_start": int(offset[0]),
-                "char_end": int(offset[1]),
-                "is_verbatim_match": int(offset[0]) >= 0,
+                "char_start": offset_start,
+                "char_end": offset_end,
+                "is_verbatim_match": offset_start >= 0,
             }
         )
 
