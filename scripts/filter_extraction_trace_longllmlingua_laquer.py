@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=1)
     parser.add_argument("--turn-window-k", type=int, default=2)
     parser.add_argument("--turn-separator", type=str, default="\n")
+    parser.add_argument(
+        "--first-stage-filter",
+        choices=["coarse_topk_by_ppl", "fine_topk_by_contrastive_ppl"],
+        default="coarse_topk_by_ppl",
+        help="Document/window ranking strategy used in stage-1 selection.",
+    )
     parser.add_argument("--condition-in-question", choices=["none", "before", "after"], default="after")
     parser.add_argument("--condition-text", type=str, default="")
     parser.add_argument("--condition-placement", choices=["none", "prepend", "append"], default="prepend")
@@ -156,6 +162,7 @@ def main() -> None:
                 turn_window_k=args.turn_window_k,
                 turn_separator=args.turn_separator,
                 entry_budget_multiplier=1.0,
+                first_stage_filter=args.first_stage_filter,
             )
 
             top1_window = coarse.get("coarse_top1_window", {})
@@ -202,6 +209,7 @@ def main() -> None:
             "top_k": args.top_k,
             "turn_window_k": args.turn_window_k,
             "turn_separator": args.turn_separator,
+            "first_stage_filter": args.first_stage_filter,
             "condition_in_question": args.condition_in_question,
             "condition_text": args.condition_text,
             "condition_placement": args.condition_placement,
