@@ -142,11 +142,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--condition-text", type=str, default="")
     parser.add_argument("--condition-placement", choices=["none", "prepend", "append"], default="prepend")
 
-    parser.add_argument("--llm-model-name", type=str, required=True)
-    parser.add_argument("--llm-api-key", type=str, default=os.getenv("OPENAI_API_KEY", ""))
-    parser.add_argument("--llm-base-url", type=str, default=os.getenv("OPENAI_BASE_URL"))
-    parser.add_argument("--llm-temperature", type=float, default=0.0)
-    parser.add_argument("--llm-max-tokens", type=int, default=800)
+    parser.add_argument("--model-name", type=str, required=True)
+    parser.add_argument("--api-key", type=str, default=os.getenv("OPENAI_API_KEY", ""))
+    parser.add_argument("--base-url", type=str, default=os.getenv("OPENAI_BASE_URL"))
+    parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--max-tokens", type=int, default=800)
 
     parser.add_argument("--max-trace-items", type=int, default=-1)
     parser.add_argument("--max-entries-per-item", type=int, default=-1)
@@ -243,14 +243,15 @@ def turn_window_to_context_turns(coarse_window: dict[str, Any], full_context: li
 
 def main() -> None:
     args = parse_args()
-    llm_cfg = build_llm_config(args)
+    # llm_cfg = build_llm_config(args)
 
     trace_data = load_trace(args.trace_json)
     compressor = TopKPPLPromptCompressor(
         model_name=args.compressor_model_name,
         device_map=args.compressor_device_map,
     )
-    aligner = create_aligner(llm_cfg)
+    # aligner = create_aligner(llm_cfg)
+    aligner = LoCoMoLAQuerAlignment(task="align", args=args)
 
     max_items = len(trace_data) if args.max_trace_items < 0 else min(args.max_trace_items, len(trace_data))
     results: list[dict[str, Any]] = []
