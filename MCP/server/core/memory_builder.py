@@ -138,9 +138,8 @@ class MemoryBuilder:
 
         total_entries = 0
 
-        # Process in windows if too many dialogues
-        for i in range(0, len(dialogue_objects), self.window_size):
-            window = dialogue_objects[i:i + self.window_size]
+        # Process dialogues with sliding windows
+        for window in self._iter_dialogue_windows(dialogue_objects):
 
             entries = await self._generate_memory_entries(window)
 
@@ -166,6 +165,33 @@ class MemoryBuilder:
             "added": len(dialogues),
             "entries_created": total_entries,
         }
+
+    def _iter_dialogue_windows(self, dialogue_objects: List[Dialogue]):
+        """
+        Yield dialogue windows using rolling combinations.
+
+        Example (window_size=3, overlap_size=2):
+            [0,1,2], [1,2,3], [2,3,4], ...
+        """
+        if not dialogue_objects:
+            return
+
+        if len(dialogue_objects) <= self.window_size:
+            yield dialogue_objects
+            return
+
+        # overlap_size controls context retention across adjacent windows.
+        # When overlap_size == window_size - 1 this becomes a strict
+        # "rolling by 1" sliding window.
+        step_size = max(1, self.window_size - self.overlap_size)
+        last_start = len(dialogue_objects) - self.window_size
+
+        for start in range(0, last_start + 1, step_size):
+            yield dialogue_objects[start:start + self.window_size]
+
+        # Ensure tail dialogues are not dropped when step_size > 1
+        if last_start % step_size != 0:
+            yield dialogue_objects[-self.window_size:]
 
     async def _generate_memory_entries(
         self,
