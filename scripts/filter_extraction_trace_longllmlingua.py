@@ -15,12 +15,38 @@ import math
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import torch
 from llmlingua import PromptCompressor
 
 
 class TopKPPLPromptCompressor(PromptCompressor):
     """PromptCompressor extension with explicit top-k PPL coarse filtering."""
+
+    @staticmethod
+    def save_ppl_values_plot(
+        ppl_values: list[float],
+        plot_dir: Path,
+        plot_file_stem: str,
+        title: str = "PPL values by window",
+    ) -> Path | None:
+        if not ppl_values:
+            return None
+
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        output_path = plot_dir / f"{plot_file_stem}.pdf"
+
+        x = list(range(len(ppl_values)))
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.plot(x, ppl_values, marker="o", linewidth=1.5)
+        ax.set_xlabel("Window index")
+        ax.set_ylabel("PPL value")
+        ax.set_title(title)
+        ax.grid(True, linestyle="--", alpha=0.4)
+        fig.tight_layout()
+        fig.savefig(output_path, format="pdf")
+        plt.close(fig)
+        return output_path
 
     @staticmethod
     def build_effective_question(
@@ -257,6 +283,8 @@ class TopKPPLPromptCompressor(PromptCompressor):
         turn_separator: str,
         entry_budget_multiplier: float,
         first_stage_filter: str = "coarse_topk_by_ppl",
+        ppl_plot_dir: Path | None = None,
+        ppl_plot_file_stem: str | None = None,
     ) -> dict[str, Any]:
         turn_windows = self.build_turn_windows(context=context, window_k=turn_window_k, turn_sep=turn_separator)
         window_texts = [w["text"] for w in turn_windows]
@@ -283,6 +311,17 @@ class TopKPPLPromptCompressor(PromptCompressor):
                 f"first_stage_filter must be one of [coarse_topk_by_ppl, fine_topk_by_contrastive_ppl], got {first_stage_filter}"
             )
 
+        ppl_plot_path: str | None = None
+        if ppl_plot_dir is not None and ppl_plot_file_stem:
+            saved_plot = self.save_ppl_values_plot(
+                ppl_values=ppl_values,
+                plot_dir=ppl_plot_dir,
+                plot_file_stem=ppl_plot_file_stem,
+                title=f"PPL values by window ({first_stage_filter})",
+            )
+            if saved_plot is not None:
+                ppl_plot_path = str(saved_plot)
+
         if not chosen_indices:
             return {
                 "chosen_doc_indices": [],
@@ -297,6 +336,7 @@ class TopKPPLPromptCompressor(PromptCompressor):
                 "entry_token_budget": 0,
                 "selected_token_positions": [],
                 "contrastive_token_scores": [],
+                "ppl_plot_path": ppl_plot_path,
             }
 
         top1_idx = chosen_indices[0]
@@ -318,6 +358,7 @@ class TopKPPLPromptCompressor(PromptCompressor):
             "coarse_top1_window": top1_window,
             "original_question": entry_text,
             "effective_question": fine["effective_question"],
+            "ppl_plot_path": ppl_plot_path,
         }
 
 
@@ -372,6 +413,12 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--max-trace-items", type=int, default=-1, help="Only process first N trace items, -1 for all")
     parser.add_argument("--max-entries-per-item", type=int, default=-1, help="Only process first N extracted entries per trace item")
+    parser.add_argument(
+        "--ppl-plot-subdir",
+        type=str,
+        default="ppl_plots",
+        help="Subdirectory (under output_json parent) used to save per-entry coarse-window PPL PDF plots; empty disables plotting",
+    )
     return parser.parse_args()
 
 
@@ -393,6 +440,11 @@ def main() -> None:
 
     max_items = len(trace_data) if args.max_trace_items < 0 else min(args.max_trace_items, len(trace_data))
     results: list[dict[str, Any]] = []
+    ppl_plot_dir = (
+        args.output_json.parent / args.ppl_plot_subdir
+        if str(args.ppl_plot_subdir).strip()
+        else None
+    )
 
     for item_idx in range(max_items):
         item = trace_data[item_idx]
@@ -417,6 +469,8 @@ def main() -> None:
                 turn_window_k=args.turn_window_k,
                 turn_separator=args.turn_separator,
                 entry_budget_multiplier=args.entry_token_budget_multiplier,
+                ppl_plot_dir=ppl_plot_dir,
+                ppl_plot_file_stem=f"trace_{item_idx:04d}_entry_{entry_idx:04d}",
             )
             entry_results.append(
                 {
@@ -434,6 +488,7 @@ def main() -> None:
                     "entry_token_budget": res["entry_token_budget"],
                     "selected_token_positions": res["selected_token_positions"],
                     "contrastive_token_scores": res["contrastive_token_scores"],
+                    "ppl_plot_path": res.get("ppl_plot_path"),
                 }
             )
 
@@ -460,6 +515,7 @@ def main() -> None:
             "condition_placement": args.condition_placement,
             "max_trace_items": args.max_trace_items,
             "max_entries_per_item": args.max_entries_per_item,
+            "ppl_plot_subdir": args.ppl_plot_subdir,
         },
         "results": results,
     }
