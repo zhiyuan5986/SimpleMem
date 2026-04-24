@@ -173,8 +173,8 @@ def main() -> None:
                 first_stage_filter=args.first_stage_filter,
             )
 
-            top1_window = coarse.get("coarse_top1_window", {})
-            support_turns = turn_window_to_context_turns(top1_window, [str(c) for c in context]) if top1_window else []
+            merged_window = coarse.get("coarse_merged_window", {})
+            support_turns = turn_window_to_context_turns(merged_window, [str(c) for c in context]) if merged_window else []
 
             align_result = align_entry_with_laquer(aligner=aligner, entry_text=entry_text, context_turns=support_turns) if support_turns else {}
             raw_rows = (
@@ -191,7 +191,8 @@ def main() -> None:
                     "coarse_topk_indices": coarse["chosen_doc_indices"],
                     "coarse_topk_windows": coarse["chosen_windows"],
                     "coarse_topk_ppl": coarse["chosen_doc_ppl"],
-                    "coarse_top1_window": top1_window,
+                    "coarse_top1_window": coarse.get("coarse_top1_window", {}),
+                    "coarse_merged_window": merged_window,
                     "llm_raw_spans": raw_rows,
                     "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
                     "llm_spans": spans,

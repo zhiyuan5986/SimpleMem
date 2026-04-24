@@ -327,6 +327,7 @@ class TopKPPLPromptCompressor(PromptCompressor):
                 "chosen_doc_indices": [],
                 "chosen_doc_ppl": [],
                 "chosen_windows": [],
+                "coarse_merged_window": {},
                 "effective_question": self.build_effective_question(entry_text, condition_text, condition_placement),
                 "original_question": entry_text,
                 "compressed_prompt": "",
@@ -339,11 +340,18 @@ class TopKPPLPromptCompressor(PromptCompressor):
                 "ppl_plot_path": ppl_plot_path,
             }
 
-        top1_idx = chosen_indices[0]
-        top1_window = turn_windows[top1_idx]
+        chosen_windows = [turn_windows[i] for i in chosen_indices]
+        merged_turn_indices = sorted(
+            {
+                turn_idx
+                for window in chosen_windows
+                for turn_idx in window.get("turn_indices", [])
+            }
+        )
+        merged_context_text = turn_separator.join([str(context[i]) for i in merged_turn_indices]) if merged_turn_indices else ""
 
         fine = self.token_level_contrastive_compress(
-            context_text=top1_window["text"],
+            context_text=merged_context_text,
             entry_text=entry_text,
             condition_text=condition_text,
             condition_placement=condition_placement,
@@ -354,8 +362,13 @@ class TopKPPLPromptCompressor(PromptCompressor):
             **fine,
             "chosen_doc_indices": chosen_indices,
             "chosen_doc_ppl": [ppl_values[i] for i in chosen_indices],
-            "chosen_windows": [turn_windows[i] for i in chosen_indices],
-            "coarse_top1_window": top1_window,
+            "chosen_windows": chosen_windows,
+            "coarse_top1_window": chosen_windows[0],
+            "coarse_merged_window": {
+                "window_index": -1,
+                "turn_indices": merged_turn_indices,
+                "text": merged_context_text,
+            },
             "original_question": entry_text,
             "effective_question": fine["effective_question"],
             "ppl_plot_path": ppl_plot_path,
@@ -480,6 +493,7 @@ def main() -> None:
                     "coarse_topk_windows": res["chosen_windows"],
                     "coarse_topk_ppl": res["chosen_doc_ppl"],
                     "coarse_top1_window": res.get("coarse_top1_window", {}),
+                    "coarse_merged_window": res.get("coarse_merged_window", {}),
                     "effective_question": res["effective_question"],
                     "compressed_prompt": res["compressed_prompt"],
                     "origin_tokens": res["origin_tokens"],
