@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.filter_extraction_trace_longllmlingua import TopKPPLPromptCompressor, load_trace
+from database.vector_store import RawContextVectorStore
+from models.raw_context import RawContextEntry
 from src.consts import LFQA_TASK
 from src.laquer_methods.llm_method import LLMBasedAlignment  # type: ignore
 
@@ -56,7 +57,7 @@ def parse_args() -> argparse.Namespace:
         "--spans-db-dir",
         type=Path,
         default=None,
-        help="Directory for storing entry-aligned LLM span sqlite DB (default: sibling folder of output-json).",
+        help="Directory for storing entry-aligned LLM span LanceDB (default: sibling folder of output-json).",
     )
     return parser.parse_args()
 
@@ -179,32 +180,21 @@ def parse_entry(entry_obj: Any, trace_item_index: int, entry_index: int) -> tupl
     return entry_id, entry_text, {"entry_id": entry_id, "lossless_restatement": entry_text}
 
 
-def init_spans_db(spans_db_dir: Path) -> sqlite3.Connection:
+def init_spans_db(spans_db_dir: Path) -> RawContextVectorStore:
     spans_db_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(spans_db_dir / "llm_spans.sqlite")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS llm_spans (
-            entry_id TEXT PRIMARY KEY,
-            text TEXT NOT NULL,
-            metadata_json TEXT NOT NULL
-        )
-        """
+    return RawContextVectorStore(
+        db_path=str(spans_db_dir),
+        table_name="llm_spans",
     )
-    conn.commit()
-    return conn
 
 
-def upsert_span_row(conn: sqlite3.Connection, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
-    conn.execute(
-        """
-        INSERT INTO llm_spans (entry_id, text, metadata_json)
-        VALUES (?, ?, ?)
-        ON CONFLICT(entry_id) DO UPDATE SET
-            text = excluded.text,
-            metadata_json = excluded.metadata_json
-        """,
-        (entry_id, text, json.dumps(metadata, ensure_ascii=False)),
+def upsert_span_row(store: RawContextVectorStore, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
+    store.upsert_entry(
+        RawContextEntry(
+            entry_id=entry_id,
+            text=text,
+            metadata=metadata,
+        )
     )
 
 
@@ -223,7 +213,7 @@ def main() -> None:
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     spans_db_dir = args.spans_db_dir or (args.output_json.parent / f"{args.output_json.stem}_spans_db")
-    spans_conn = init_spans_db(spans_db_dir)
+    spans_store = init_spans_db(spans_db_dir)
 
     for item_idx in range(max_items):
         item = trace_data[item_idx]
@@ -277,7 +267,7 @@ def main() -> None:
                 "llm_raw_spans": raw_rows,
                 "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
             }
-            upsert_span_row(spans_conn, entry_id=entry_id, text=span_text_joined, metadata=span_db_metadata)
+            upsert_span_row(spans_store, entry_id=entry_id, text=span_text_joined, metadata=span_db_metadata)
 
             entry_results.append(
                 {
@@ -329,10 +319,9 @@ def main() -> None:
     }
 
     args.output_json.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
-    spans_conn.commit()
-    spans_conn.close()
+    spans_store.optimize()
     print(f"Saved filtered+aligned results to: {args.output_json}")
-    print(f"Saved entry-aligned LLM spans DB to: {spans_db_dir / 'llm_spans.sqlite'}")
+    print(f"Saved entry-aligned LLM spans DB to table 'llm_spans' under: {spans_db_dir}")
 
 
 if __name__ == "__main__":

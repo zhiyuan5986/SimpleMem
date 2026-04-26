@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import json
-import sqlite3
 from pathlib import Path
 from typing import Any
+
+from database.vector_store import RawContextVectorStore
+from models.raw_context import RawContextEntry
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,32 +27,21 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def init_spans_db(spans_db_dir: Path) -> sqlite3.Connection:
+def init_spans_db(spans_db_dir: Path) -> RawContextVectorStore:
     spans_db_dir.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(spans_db_dir / "llm_spans.sqlite")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS llm_spans (
-            entry_id TEXT PRIMARY KEY,
-            text TEXT NOT NULL,
-            metadata_json TEXT NOT NULL
-        )
-        """
+    return RawContextVectorStore(
+        db_path=str(spans_db_dir),
+        table_name="llm_spans",
     )
-    conn.commit()
-    return conn
 
 
-def upsert_span_row(conn: sqlite3.Connection, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
-    conn.execute(
-        """
-        INSERT INTO llm_spans (entry_id, text, metadata_json)
-        VALUES (?, ?, ?)
-        ON CONFLICT(entry_id) DO UPDATE SET
-            text = excluded.text,
-            metadata_json = excluded.metadata_json
-        """,
-        (entry_id, text, json.dumps(metadata, ensure_ascii=False)),
+def upsert_span_row(store: RawContextVectorStore, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
+    store.upsert_entry(
+        RawContextEntry(
+            entry_id=entry_id,
+            text=text,
+            metadata=metadata,
+        )
     )
 
 
@@ -117,7 +108,7 @@ def main() -> None:
 
     transformed_filtered = dict(legacy_filtered)
     transformed_results = []
-    conn = init_spans_db(args.spans_db_dir)
+    spans_store = init_spans_db(args.spans_db_dir)
 
     for result in legacy_filtered.get("results", []):
         trace_item_index = int(result.get("trace_item_index", -1))
@@ -143,7 +134,7 @@ def main() -> None:
                 "llm_raw_spans": entry.get("llm_raw_spans", []),
                 "llm_response": entry.get("llm_response", {}),
             }
-            upsert_span_row(conn, entry_id, span_text_joined, metadata)
+            upsert_span_row(spans_store, entry_id, span_text_joined, metadata)
 
             transformed_entry = dict(entry)
             transformed_entry["entry_id"] = entry_id
@@ -167,12 +158,11 @@ def main() -> None:
 
     args.output_trace_json.write_text(json.dumps(transformed_trace, ensure_ascii=False, indent=2), encoding="utf-8")
     args.output_filtered_json.write_text(json.dumps(transformed_filtered, ensure_ascii=False, indent=2), encoding="utf-8")
-    conn.commit()
-    conn.close()
+    spans_store.optimize()
 
     print(f"Saved transformed trace: {args.output_trace_json}")
     print(f"Saved transformed filtered result: {args.output_filtered_json}")
-    print(f"Saved spans DB: {args.spans_db_dir / 'llm_spans.sqlite'}")
+    print(f"Saved spans DB: table 'llm_spans' under {args.spans_db_dir}")
 
 
 if __name__ == "__main__":
