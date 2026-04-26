@@ -221,7 +221,7 @@ class MemoryBuilder:
 
                 # Parse response
                 entries = self._parse_llm_response(response, dialogue_ids)
-                self._record_extraction_trace(dialogue_context, context_entries, entries)
+                self._record_extraction_trace(dialogues, self.previous_entries[:3], entries)
                 return entries
 
             except Exception as e:
@@ -432,7 +432,7 @@ Now process the above dialogues. Return ONLY the JSON array, no other explanatio
 
                 # Parse response
                 entries = self._parse_llm_response(response, dialogue_ids)
-                self._record_extraction_trace(dialogue_context, context_entries, entries)
+                self._record_extraction_trace(window, self.previous_entries[:3], entries)
                 print(f"[Worker {window_num}] Generated {len(entries)} entries")
                 return entries
 
@@ -445,15 +445,19 @@ Now process the above dialogues. Return ONLY the JSON array, no other explanatio
 
     def _record_extraction_trace(
         self,
-        dialogue_context: List[str],
-        context_entries: List[str],
+        dialogue_window: List[Dialogue],
+        context_entries: List[MemoryEntry],
         entries: List[MemoryEntry]
     ):
         """Record prompt inputs and extraction outputs for traceability."""
+        dialogue_context = [str(d) for d in dialogue_window]
         trace_item = {
+            "dialogue_text": [dialogue.model_dump() for dialogue in dialogue_window],
             "dialogue_context": dialogue_context,
-            "context": context_entries,
-            "extracted_entries": [entry.lossless_restatement for entry in entries]
+            "context": [entry.lossless_restatement for entry in context_entries],
+            "context_entries": [entry.model_dump() for entry in context_entries],
+            "extracted_entries": [entry.model_dump() for entry in entries],
+            "extracted_entry_texts": [entry.lossless_restatement for entry in entries],
         }
         with self._trace_lock:
             self.extraction_trace.append(trace_item)
