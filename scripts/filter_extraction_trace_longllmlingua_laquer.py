@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -69,6 +70,7 @@ def normalize_spans(rows: list[dict[str, Any]], context_turns: list[dict[str, An
         return -1, -1
 
     for row in rows:
+        # print(row)
         source_id = str(row.get("documentFile", ""))
         turn = source_map.get(source_id)
         if not turn:
@@ -126,11 +128,11 @@ def turn_window_to_context_turns(coarse_window: dict[str, Any], full_context: li
     for idx in coarse_window.get("turn_indices", []):
         turn_text = str(full_context[idx])
         speaker = "Speaker"
-        if ":" in turn_text:
-            left, right = turn_text.split(":", 1)
-            if left.strip() and len(left.strip()) <= 32:
-                speaker = left.strip()
-                turn_text = right.strip()
+        # if ":" in turn_text:
+        #     left, right = turn_text.split(":", 1)
+        #     if left.strip() and len(left.strip()) <= 32:
+        #         speaker = left.strip()
+        #         turn_text = right.strip()
         turns.append({"turn_index": idx, "speaker": speaker, "text": turn_text})
     return turns
 
@@ -147,6 +149,8 @@ def main() -> None:
 
     max_items = len(trace_data) if args.max_trace_items < 0 else min(args.max_trace_items, len(trace_data))
     results: list[dict[str, Any]] = []
+
+    args.output_json.parent.mkdir(parents=True, exist_ok=True)
 
     for item_idx in range(max_items):
         item = trace_data[item_idx]
@@ -171,6 +175,8 @@ def main() -> None:
                 turn_separator=args.turn_separator,
                 entry_budget_multiplier=1.0,
                 first_stage_filter=args.first_stage_filter,
+                ppl_plot_dir=Path(os.path.splitext(args.output_json)[0]) / "ppl_plot",
+                ppl_plot_file_stem=f"trace_{item_idx:04d}_entry_{entry_idx:04d}",
             )
 
             merged_window = coarse.get("coarse_merged_window", {})
@@ -230,7 +236,6 @@ def main() -> None:
         "results": results,
     }
 
-    args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Saved filtered+aligned results to: {args.output_json}")
 
