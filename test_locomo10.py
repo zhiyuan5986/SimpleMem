@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 import time
 import json
-from typing import List, Dict, Optional, Union
+from typing import Any, List, Dict, Optional, Union
 from dataclasses import dataclass
 # import tiktoken  # Removed - token counting disabled
 from tqdm import tqdm
@@ -63,6 +63,7 @@ class Turn:
     speaker: str
     dia_id: str
     text: str
+    metadata: Dict[str, Any]
 
 @dataclass
 class Session:
@@ -103,6 +104,7 @@ def parse_session(session_data: List[dict], session_id: int, date_time: str) -> 
     """Parse a single session's data, including turns with images by using their captions."""
     turns = []
     for turn in session_data:
+        raw_turn = dict(turn)
         # For turns with images, combine caption and text
         text = turn.get("text", "")
         if "img_url" in turn and "blip_caption" in turn:
@@ -115,7 +117,13 @@ def parse_session(session_data: List[dict], session_id: int, date_time: str) -> 
         turns.append(Turn(
             speaker=turn["speaker"],
             dia_id=turn["dia_id"],
-            text=text
+            text=text,
+            metadata={
+                **raw_turn,
+                "resolved_text": text,
+                "session_id": session_id,
+                "session_date_time": date_time,
+            },
         ))
     return Session(session_id=session_id, date_time=date_time, turns=turns)
 
@@ -755,7 +763,12 @@ Return ONLY the JSON, no other text.
                     dialogue_id=dialogue_id,
                     speaker=turn.speaker,
                     content=turn.text,
-                    timestamp=session.date_time  # Use session datetime
+                    timestamp=session.date_time,  # Use session datetime
+                    metadata={
+                        "session_id": session_id,
+                        "session_date_time": session.date_time,
+                        "turn_metadata": turn.metadata,
+                    },
                 )
                 dialogues.append(dialogue)
                 dialogue_id += 1

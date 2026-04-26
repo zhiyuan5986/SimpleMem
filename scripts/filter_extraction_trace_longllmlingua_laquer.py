@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-trace-items", type=int, default=-1)
     parser.add_argument("--max-entries-per-item", type=int, default=-1)
     parser.add_argument("--min-span-confidence", type=float, default=0.0)
+    parser.add_argument(
+        "--spans-db-dir",
+        type=Path,
+        default=None,
+        help="Directory for storing entry-aligned LLM span sqlite DB (default: sibling folder of output-json).",
+    )
     return parser.parse_args()
 
 
@@ -137,6 +144,70 @@ def turn_window_to_context_turns(coarse_window: dict[str, Any], full_context: li
     return turns
 
 
+def normalize_context_turns(item: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    dialogue_text = item.get("dialogue_text", [])
+    if isinstance(dialogue_text, list) and dialogue_text and isinstance(dialogue_text[0], dict):
+        full_context = [str(turn.get("content", "")) for turn in dialogue_text]
+        turn_metadata = []
+        for idx, turn in enumerate(dialogue_text):
+            turn_metadata.append(
+                {
+                    "turn_index": idx,
+                    "speaker": turn.get("speaker", "Speaker"),
+                    "text": str(turn.get("content", "")),
+                    "dialogue_id": turn.get("dialogue_id"),
+                    "timestamp": turn.get("timestamp"),
+                    "metadata": turn.get("metadata", {}),
+                }
+            )
+        return full_context, turn_metadata
+
+    context = item.get("dialogue_context", [])
+    if isinstance(context, list):
+        return [str(c) for c in context], [{"turn_index": i, "speaker": "Speaker", "text": str(c)} for i, c in enumerate(context)]
+    return [], []
+
+
+def parse_entry(entry_obj: Any, trace_item_index: int, entry_index: int) -> tuple[str, str, dict[str, Any]]:
+    if isinstance(entry_obj, dict):
+        entry_id = str(entry_obj.get("entry_id") or f"trace_{trace_item_index}_entry_{entry_index}")
+        entry_text = str(entry_obj.get("lossless_restatement", ""))
+        return entry_id, entry_text, entry_obj
+
+    entry_text = str(entry_obj)
+    entry_id = f"trace_{trace_item_index}_entry_{entry_index}"
+    return entry_id, entry_text, {"entry_id": entry_id, "lossless_restatement": entry_text}
+
+
+def init_spans_db(spans_db_dir: Path) -> sqlite3.Connection:
+    spans_db_dir.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(spans_db_dir / "llm_spans.sqlite")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS llm_spans (
+            entry_id TEXT PRIMARY KEY,
+            text TEXT NOT NULL,
+            metadata_json TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def upsert_span_row(conn: sqlite3.Connection, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO llm_spans (entry_id, text, metadata_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(entry_id) DO UPDATE SET
+            text = excluded.text,
+            metadata_json = excluded.metadata_json
+        """,
+        (entry_id, text, json.dumps(metadata, ensure_ascii=False)),
+    )
+
+
 def main() -> None:
     args = parse_args()
 
@@ -151,10 +222,12 @@ def main() -> None:
     results: list[dict[str, Any]] = []
 
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
+    spans_db_dir = args.spans_db_dir or (args.output_json.parent / f"{args.output_json.stem}_spans_db")
+    spans_conn = init_spans_db(spans_db_dir)
 
     for item_idx in range(max_items):
         item = trace_data[item_idx]
-        context = item.get("dialogue_context", [])
+        context, context_turn_meta = normalize_context_turns(item)
         entries = item.get("extracted_entries", [])
         if not isinstance(context, list) or not isinstance(entries, list):
             continue
@@ -163,7 +236,7 @@ def main() -> None:
         entry_results: list[dict[str, Any]] = []
 
         for entry_idx in range(max_entries):
-            entry_text = str(entries[entry_idx])
+            entry_id, entry_text, entry_metadata = parse_entry(entries[entry_idx], item_idx, entry_idx)
             coarse = compressor.compress_with_coarse_topk(
                 context=[str(c) for c in context],
                 entry_text=entry_text,
@@ -181,6 +254,10 @@ def main() -> None:
 
             merged_window = coarse.get("coarse_merged_window", {})
             support_turns = turn_window_to_context_turns(merged_window, [str(c) for c in context]) if merged_window else []
+            for turn in support_turns:
+                idx = turn["turn_index"]
+                if idx < len(context_turn_meta):
+                    turn.update(context_turn_meta[idx])
 
             align_result = align_entry_with_laquer(aligner=aligner, entry_text=entry_text, context_turns=support_turns) if support_turns else {}
             raw_rows = (
@@ -189,11 +266,25 @@ def main() -> None:
                 else []
             )
             spans = normalize_spans(rows=raw_rows, context_turns=support_turns)
+            span_text_joined = " ".join([span.get("span_text", "") for span in spans if span.get("span_text")]).strip()
+            span_db_metadata = {
+                "trace_item_index": item_idx,
+                "entry_index": entry_idx,
+                "entry_id": entry_id,
+                "entry_text": entry_text,
+                "entry_metadata": entry_metadata,
+                "llm_spans": spans,
+                "llm_raw_spans": raw_rows,
+                "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
+            }
+            upsert_span_row(spans_conn, entry_id=entry_id, text=span_text_joined, metadata=span_db_metadata)
 
             entry_results.append(
                 {
                     "entry_index": entry_idx,
+                    "entry_id": entry_id,
                     "entry_text": entry_text,
+                    "entry_metadata": entry_metadata,
                     "coarse_topk_indices": coarse["chosen_doc_indices"],
                     "coarse_topk_windows": coarse["chosen_windows"],
                     "coarse_topk_ppl": coarse["chosen_doc_ppl"],
@@ -231,13 +322,17 @@ def main() -> None:
             "model": args.model,
             "max_trace_items": args.max_trace_items,
             "max_entries_per_item": args.max_entries_per_item,
+            "spans_db_dir": str(spans_db_dir),
             "min_span_confidence": args.min_span_confidence,
         },
         "results": results,
     }
 
     args.output_json.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
+    spans_conn.commit()
+    spans_conn.close()
     print(f"Saved filtered+aligned results to: {args.output_json}")
+    print(f"Saved entry-aligned LLM spans DB to: {spans_db_dir / 'llm_spans.sqlite'}")
 
 
 if __name__ == "__main__":

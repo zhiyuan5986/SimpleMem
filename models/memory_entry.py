@@ -5,7 +5,7 @@ Section 3.1: Semantic Structured Compression
 Each MemoryEntry represents a compact, context-independent memory unit
 with multi-view indexing (Semantic, Lexical, Symbolic layers)
 """
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 import uuid
 
@@ -75,6 +75,7 @@ class Dialogue(BaseModel):
     speaker: str
     content: str
     timestamp: Optional[str] = None  # ISO 8601 format
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
     def __str__(self) -> str:
         time_str = f"[{self.timestamp}] " if self.timestamp else ""
