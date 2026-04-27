@@ -135,14 +135,31 @@ def main():
     parser.add_argument("--raw-table", type=str, default="llm_spans")
     parser.add_argument("--result-file", type=str, default="locomo10_dualview_results.json")
     parser.add_argument("--llm-judge", action="store_true", help="Enable LLM-as-judge metric")
+    parser.add_argument("--llm-api-key", type=str, default=None, help="LLM API key")
+    parser.add_argument("--llm-model", type=str, default=None, help="LLM model name")
+    parser.add_argument("--llm-base-url", type=str, default=None, help="LLM API base URL")
+    parser.add_argument("--embedding-model", type=str, default=None, help="Embedding model name/path")
+    parser.add_argument(
+        "--embedding-use-optimization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable embedding-model optimization (use --no-embedding-use-optimization to disable)",
+    )
     args = parser.parse_args()
 
     samples = load_locomo_dataset(args.dataset)
     if args.num_samples is not None:
         samples = samples[: args.num_samples]
 
-    llm_client = LLMClient()
-    embedding_model = EmbeddingModel()
+    llm_client = LLMClient(
+        api_key=args.llm_api_key,
+        model=args.llm_model,
+        base_url=args.llm_base_url,
+    )
+    embedding_model = EmbeddingModel(
+        model_name=args.embedding_model,
+        use_optimization=args.embedding_use_optimization,
+    )
     answer_generator = AnswerGenerator(llm_client=llm_client)
     judge_client = create_judge_llm_client() if args.llm_judge else None
 

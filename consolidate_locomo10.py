@@ -107,7 +107,11 @@ def find_sample_db_dir(sample_idx: int, search_roots: list[Path]) -> Path | None
 
 def init_spans_db(spans_db_dir: Path) -> RawContextVectorStore:
     spans_db_dir.mkdir(parents=True, exist_ok=True)
-    return RawContextVectorStore(db_path=str(spans_db_dir), table_name="llm_spans")
+    store = RawContextVectorStore(db_path=str(spans_db_dir), table_name="llm_spans")
+    # Ensure FTS is available for keyword/BM25 retrieval even when opening an existing table.
+    # This avoids "Cannot perform full text search unless an INVERTED index has been created".
+    store._init_fts_index()
+    return store
 
 
 def upsert_span_row(store: RawContextVectorStore, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
