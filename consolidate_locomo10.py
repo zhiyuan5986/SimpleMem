@@ -129,9 +129,11 @@ def attach_turn_dia_ids_to_spans(
             turn_idx = int(turn.get("turn_index", -1))
         except (TypeError, ValueError):
             continue
+        canonical_dia_id = resolve_original_dia_id(turn)
         turn_id_map[turn_idx] = {
-            "dia_id": turn.get("dialogue_id"),
-            "dialogue_id": turn.get("dialogue_id"),
+            "dia_id": canonical_dia_id,
+            "dialogue_id": canonical_dia_id,
+            "legacy_dialogue_id": turn.get("dialogue_id"),
         }
 
     enriched: list[dict[str, Any]] = []
@@ -145,6 +147,23 @@ def attach_turn_dia_ids_to_spans(
             out.update(turn_id_map[turn_idx])
         enriched.append(out)
     return enriched
+
+
+def resolve_original_dia_id(turn: dict[str, Any]) -> Any:
+    """Resolve LoCoMo's original per-turn dia_id from turn metadata when available."""
+    metadata = turn.get("metadata", {})
+    if isinstance(metadata, dict):
+        turn_meta = metadata.get("turn_metadata", {})
+        if isinstance(turn_meta, dict):
+            original_dia_id = turn_meta.get("dia_id")
+            if original_dia_id is not None and str(original_dia_id).strip():
+                return original_dia_id
+        # Fallback for traces that may flatten metadata differently.
+        original_dia_id = metadata.get("dia_id")
+        if original_dia_id is not None and str(original_dia_id).strip():
+            return original_dia_id
+    # Final fallback keeps previous behavior.
+    return turn.get("dialogue_id")
 
 
 def process_single_sample(
@@ -212,9 +231,9 @@ def process_single_sample(
             spans = attach_turn_dia_ids_to_spans(spans=spans, support_turns=support_turns)
             support_turn_dia_ids = sorted(
                 {
-                    str(turn.get("dialogue_id")).strip()
+                    str(resolve_original_dia_id(turn)).strip()
                     for turn in support_turns
-                    if turn.get("dialogue_id") is not None and str(turn.get("dialogue_id")).strip()
+                    if resolve_original_dia_id(turn) is not None and str(resolve_original_dia_id(turn)).strip()
                 }
             )
 
