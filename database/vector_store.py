@@ -329,6 +329,28 @@ class MemoryEntryVectorStore(BaseLanceVectorStore[MemoryEntry]):
             print(f"Error during structured search: {e}")
             return []
 
+    def get_entry_by_id(self, entry_id: str) -> Optional[MemoryEntry]:
+        """Get a single memory entry by entry_id."""
+        try:
+            safe_entry_id = entry_id.replace("'", "''")
+            results = self.table.search().where(f"entry_id = '{safe_entry_id}'", prefilter=True).limit(1).to_list()
+            entries = self._results_to_entries(results)
+            return entries[0] if entries else None
+        except Exception as e:
+            print(f"Error during get_entry_by_id: {e}")
+            return None
+
+    def get_entries_by_ids(self, entry_ids: List[str]) -> Dict[str, MemoryEntry]:
+        """Get memory entries by entry_id list."""
+        if not entry_ids:
+            return {}
+        found: Dict[str, MemoryEntry] = {}
+        for entry_id in entry_ids:
+            entry = self.get_entry_by_id(entry_id)
+            if entry is not None:
+                found[entry_id] = entry
+        return found
+
 
 class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
     """Vector store for entry-aligned raw context spans."""
@@ -378,6 +400,17 @@ class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
         safe_entry_id = entry.entry_id.replace("'", "''")
         self.table.delete(f"entry_id = '{safe_entry_id}'")
         self.add_entries([entry])
+
+    def get_entry_by_id(self, entry_id: str) -> Optional[RawContextEntry]:
+        """Get a single raw context entry by entry_id."""
+        try:
+            safe_entry_id = entry_id.replace("'", "''")
+            results = self.table.search().where(f"entry_id = '{safe_entry_id}'", prefilter=True).limit(1).to_list()
+            entries = self._results_to_entries(results)
+            return entries[0] if entries else None
+        except Exception as e:
+            print(f"Error during raw get_entry_by_id: {e}")
+            return None
 
 
 class VectorStore(MemoryEntryVectorStore):
