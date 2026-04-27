@@ -118,6 +118,35 @@ def upsert_span_row(store: RawContextVectorStore, entry_id: str, text: str, meta
     store.upsert_entry(RawContextEntry(entry_id=entry_id, text=text, metadata=metadata))
 
 
+def attach_turn_dia_ids_to_spans(
+    spans: list[dict[str, Any]],
+    support_turns: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Backfill dia/dialogue ids from support turns onto each normalized span."""
+    turn_id_map: dict[int, dict[str, Any]] = {}
+    for turn in support_turns:
+        try:
+            turn_idx = int(turn.get("turn_index", -1))
+        except (TypeError, ValueError):
+            continue
+        turn_id_map[turn_idx] = {
+            "dia_id": turn.get("dialogue_id"),
+            "dialogue_id": turn.get("dialogue_id"),
+        }
+
+    enriched: list[dict[str, Any]] = []
+    for span in spans:
+        out = dict(span)
+        try:
+            turn_idx = int(out.get("turn_index", -1))
+        except (TypeError, ValueError):
+            turn_idx = -1
+        if turn_idx in turn_id_map:
+            out.update(turn_id_map[turn_idx])
+        enriched.append(out)
+    return enriched
+
+
 def process_single_sample(
     *,
     args: argparse.Namespace,
@@ -180,6 +209,14 @@ def process_single_sample(
                 else []
             )
             spans = normalize_spans(rows=raw_rows, context_turns=support_turns)
+            spans = attach_turn_dia_ids_to_spans(spans=spans, support_turns=support_turns)
+            support_turn_dia_ids = sorted(
+                {
+                    str(turn.get("dialogue_id")).strip()
+                    for turn in support_turns
+                    if turn.get("dialogue_id") is not None and str(turn.get("dialogue_id")).strip()
+                }
+            )
 
             span_text_joined = " ".join([span.get("span_text", "") for span in spans if span.get("span_text")]).strip()
             span_db_metadata = {
@@ -189,6 +226,8 @@ def process_single_sample(
                 "entry_id": entry_id,
                 "entry_text": entry_text,
                 "entry_metadata": entry_metadata,
+                "support_turns": support_turns,
+                "support_turn_dia_ids": support_turn_dia_ids,
                 "llm_spans": spans,
                 "llm_raw_spans": raw_rows,
                 "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
