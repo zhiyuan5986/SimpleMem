@@ -110,6 +110,7 @@ def main(task: str, split: str, results, args, laquer_method_name: str):
                 "topic": instance_unique_id,
                 "unique_id": instance_unique_id,
                 "source_spans": source_spans,
+                "fallback_source_spans": documents,
                 "source_metadata": source_metadata,
                 "sentence": sentence,
                 "scuSpanOffsets": any_row['scuSpanOffsets'],
