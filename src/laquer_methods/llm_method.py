@@ -92,7 +92,32 @@ class LLMBasedAlignment:
 
 
     def parse_response(self, datapoint, response):
-        
+        primary_sources = datapoint['source_spans']
+        fallback_sources = datapoint.get('fallback_source_spans', {})
+
+        def try_find_offset(output_span_alignment):
+            for source_id, source_text in primary_sources.items():
+                offset = find_substring(source_text, output_span_alignment.strip())
+                if offset[0] != -1:
+                    return source_id, source_text, offset, 'primary'
+
+            for source_id, source_text in primary_sources.items():
+                offset = self.find_substring_fuzzy(source_text, output_span_alignment.strip())
+                if offset[0] != -1:
+                    return source_id, source_text, offset, 'primary'
+
+            for source_id, source_text in fallback_sources.items():
+                offset = find_substring(source_text, output_span_alignment.strip())
+                if offset[0] != -1:
+                    return source_id, source_text, offset, 'fallback'
+
+            for source_id, source_text in fallback_sources.items():
+                offset = self.find_substring_fuzzy(source_text, output_span_alignment.strip())
+                if offset[0] != -1:
+                    return source_id, source_text, offset, 'fallback'
+
+            return None, None, (-1, -1), None
+
         found_alignments = []
         try:
             response['text'].split(';')
@@ -101,25 +126,14 @@ class LLMBasedAlignment:
         for output_span_alignment in response['text'].split(';'):
             if output_span_alignment.strip() == '':
                 continue
-            
-            for source_id, source_text in datapoint['source_spans'].items():
-                offset = find_substring(source_text, output_span_alignment.strip())
-                if offset[0] != -1:
-                    break
+            source_id, source_text, offset, alignment_source = try_find_offset(output_span_alignment)
 
-            # Try again with fuzzy matching
-            if offset[0] == -1:
-                for source_id, source_text in datapoint['source_spans'].items():
-                    offset = self.find_substring_fuzzy(source_text, output_span_alignment.strip())
-                    if offset[0] != -1:
-                        break
-                
-                
             if offset[0] != -1 and offset[1] != -1:
                 found_alignments.append({
                     "offset": offset,
                     "source_id": source_id,
                     "source_text": source_text,
+                    "alignment_source": alignment_source,
                 })
             else:
                 raise ValueError(f"couldn't find text {output_span_alignment}")
@@ -140,7 +154,7 @@ class LLMBasedAlignment:
             
             doc_sent_char_idx = None
             doc_sent_text = None
-            if datapoint['source_granularity'] == 'sentence':
+            if datapoint['source_granularity'] == 'sentence' and source_id in datapoint['source_metadata']:
                 any_source_metadata = datapoint['source_metadata'][source_id][0]
                 doc_sent_char_idx = int(any_source_metadata['docSentCharIdx'])
                 doc_sent_text = any_source_metadata['docSentText']
@@ -178,7 +192,8 @@ class LLMBasedAlignment:
                 'error': str(e)
             }
             datapoint = datapoint.copy()
-            datapoint.pop('source_metadata')            
+            datapoint.pop('source_metadata')
+            datapoint.pop('fallback_source_spans', None)
             return {
                 "results": results,
                 **response,
@@ -192,6 +207,7 @@ class LLMBasedAlignment:
         results = self.parse_response(datapoint, response)
         datapoint = datapoint.copy()
         datapoint.pop('source_metadata')
+        datapoint.pop('fallback_source_spans', None)
         return {
                 "results": results,
                 **response,
