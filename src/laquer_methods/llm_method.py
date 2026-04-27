@@ -91,9 +91,9 @@ class LLMBasedAlignment:
         
 
 
-    def parse_response(self, datapoint, response):
+    def parse_response(self, datapoint, response, allow_fallback_sources=True):
         primary_sources = datapoint['source_spans']
-        fallback_sources = datapoint.get('fallback_source_spans', {})
+        fallback_sources = datapoint.get('fallback_source_spans', {}) if allow_fallback_sources else {}
 
         def try_find_offset(output_span_alignment):
             for source_id, source_text in primary_sources.items():
@@ -203,13 +203,33 @@ class LLMBasedAlignment:
     @retry_wrapper
     def _extract_attribution_w_retry(self, datapoint, prompt, inference_wrapper):
         response = inference_wrapper.generate_text(messages=[{"role": "user", "content": prompt}])
-        
-        results = self.parse_response(datapoint, response)
+
+        try:
+            results = self.parse_response(datapoint, response, allow_fallback_sources=False)
+            final_response = response
+        except ValueError as e:
+            has_full_context = bool(datapoint.get('fallback_source_spans'))
+            if not has_full_context:
+                raise
+
+            full_context_datapoint = datapoint.copy()
+            full_context_datapoint['source_spans'] = full_context_datapoint['fallback_source_spans']
+            full_context_datapoint['source_granularity'] = 'document'
+            full_context_prompt = self.build_prompt(full_context_datapoint)
+            full_context_response = inference_wrapper.generate_text(messages=[{"role": "user", "content": full_context_prompt}])
+
+            results = self.parse_response(full_context_datapoint, full_context_response, allow_fallback_sources=False)
+            final_response = {
+                **full_context_response,
+                'window_parse_error': str(e),
+                'used_full_context_retry': True,
+            }
+
         datapoint = datapoint.copy()
         datapoint.pop('source_metadata')
         datapoint.pop('fallback_source_spans', None)
         return {
                 "results": results,
-                **response,
+                **final_response,
                 **datapoint
             }
