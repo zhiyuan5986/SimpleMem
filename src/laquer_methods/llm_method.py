@@ -91,9 +91,45 @@ class LLMBasedAlignment:
         
 
 
-    def parse_response(self, datapoint, response, allow_fallback_sources=True):
+    def build_full_context_sources_from_metadata(self, datapoint):
+        source_metadata = datapoint.get('source_metadata', {})
+        grouped_sentences = {}
+        for metadata_rows in source_metadata.values():
+            for row in metadata_rows:
+                document_id = row.get('documentFile')
+                sent_text = row.get('docSentText')
+                sent_idx = row.get('docSentCharIdx')
+                if document_id is None or sent_text is None:
+                    continue
+                grouped_sentences.setdefault(document_id, []).append((int(sent_idx), sent_text))
+
+        full_context_sources = {}
+        for document_id, sentence_rows in grouped_sentences.items():
+            seen_sentences = set()
+            ordered_sentences = []
+            for sent_idx, sent_text in sorted(sentence_rows, key=lambda x: x[0]):
+                sentence_key = (sent_idx, sent_text)
+                if sentence_key in seen_sentences:
+                    continue
+                seen_sentences.add(sentence_key)
+                ordered_sentences.append(sent_text)
+            if ordered_sentences:
+                full_context_sources[document_id] = " ".join(ordered_sentences)
+
+        if len(full_context_sources) > 0:
+            return full_context_sources
+
+        source_spans = datapoint.get('source_spans', {})
+        for source_id, source_text in source_spans.items():
+            document_id = source_id.split('__')[0]
+            full_context_sources.setdefault(document_id, [])
+            if source_text not in full_context_sources[document_id]:
+                full_context_sources[document_id].append(source_text)
+
+        return {document_id: " ".join(texts) for document_id, texts in full_context_sources.items() if len(texts) > 0}
+
+    def parse_response(self, datapoint, response):
         primary_sources = datapoint['source_spans']
-        fallback_sources = datapoint.get('fallback_source_spans', {}) if allow_fallback_sources else {}
 
         def try_find_offset(output_span_alignment):
             for source_id, source_text in primary_sources.items():
@@ -105,16 +141,6 @@ class LLMBasedAlignment:
                 offset = self.find_substring_fuzzy(source_text, output_span_alignment.strip())
                 if offset[0] != -1:
                     return source_id, source_text, offset, 'primary'
-
-            for source_id, source_text in fallback_sources.items():
-                offset = find_substring(source_text, output_span_alignment.strip())
-                if offset[0] != -1:
-                    return source_id, source_text, offset, 'fallback'
-
-            for source_id, source_text in fallback_sources.items():
-                offset = self.find_substring_fuzzy(source_text, output_span_alignment.strip())
-                if offset[0] != -1:
-                    return source_id, source_text, offset, 'fallback'
 
             return None, None, (-1, -1), None
 
@@ -193,7 +219,6 @@ class LLMBasedAlignment:
             }
             datapoint = datapoint.copy()
             datapoint.pop('source_metadata')
-            datapoint.pop('fallback_source_spans', None)
             return {
                 "results": results,
                 **response,
@@ -205,20 +230,22 @@ class LLMBasedAlignment:
         response = inference_wrapper.generate_text(messages=[{"role": "user", "content": prompt}])
 
         try:
-            results = self.parse_response(datapoint, response, allow_fallback_sources=False)
+            results = self.parse_response(datapoint, response)
             final_response = response
         except ValueError as e:
-            has_full_context = bool(datapoint.get('fallback_source_spans'))
+            has_required_alignment_fields = isinstance(datapoint.get('source_spans'), dict) and isinstance(datapoint.get('source_metadata'), dict)
+            full_context_sources = self.build_full_context_sources_from_metadata(datapoint) if has_required_alignment_fields else {}
+            has_full_context = len(full_context_sources) > 0
             if not has_full_context:
                 raise
 
             full_context_datapoint = datapoint.copy()
-            full_context_datapoint['source_spans'] = full_context_datapoint['fallback_source_spans']
+            full_context_datapoint['source_spans'] = full_context_sources
             full_context_datapoint['source_granularity'] = 'document'
             full_context_prompt = self.build_prompt(full_context_datapoint)
             full_context_response = inference_wrapper.generate_text(messages=[{"role": "user", "content": full_context_prompt}])
 
-            results = self.parse_response(full_context_datapoint, full_context_response, allow_fallback_sources=False)
+            results = self.parse_response(full_context_datapoint, full_context_response)
             final_response = {
                 **full_context_response,
                 'window_parse_error': str(e),
@@ -227,7 +254,6 @@ class LLMBasedAlignment:
 
         datapoint = datapoint.copy()
         datapoint.pop('source_metadata')
-        datapoint.pop('fallback_source_spans', None)
         return {
                 "results": results,
                 **final_response,
