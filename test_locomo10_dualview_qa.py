@@ -28,16 +28,6 @@ from utils.llm_client import LLMClient
 RECALL_CATEGORIES = {1, 2, 4}
 
 
-def _normalize_evidence_id(value: str) -> set[str]:
-    value = str(value).strip()
-    if not value:
-        return set()
-    norm = {value}
-    if ":" in value:
-        norm.add(value.split(":")[-1].strip())
-    return norm
-
-
 def _collect_dia_ids_from_obj(obj: Any) -> set[str]:
     found: set[str] = set()
 
@@ -49,9 +39,13 @@ def _collect_dia_ids_from_obj(obj: Any) -> set[str]:
                     if isinstance(val, list):
                         for item in val:
                             if isinstance(item, (str, int)):
-                                found.update(_normalize_evidence_id(str(item)))
+                                value = str(item).strip()
+                                if value:
+                                    found.add(value)
                     elif isinstance(val, (str, int)):
-                        found.update(_normalize_evidence_id(str(val)))
+                        value = str(val).strip()
+                        if value:
+                            found.add(value)
                 _walk(val)
             return
         if isinstance(v, list):
@@ -60,7 +54,9 @@ def _collect_dia_ids_from_obj(obj: Any) -> set[str]:
             return
         if isinstance(v, str):
             for m in re.findall(r"(session_\d+:[^,\s]+)", v):
-                found.update(_normalize_evidence_id(m))
+                value = str(m).strip()
+                if value:
+                    found.add(value)
 
     _walk(obj)
     return found
@@ -77,7 +73,9 @@ def compute_recall_from_contexts(
     """
     gold_ids: set[str] = set()
     for e in qa_evidence or []:
-        gold_ids.update(_normalize_evidence_id(e))
+        value = str(e).strip()
+        if value:
+            gold_ids.add(value)
     if not gold_ids:
         return None, [], []
 
@@ -145,6 +143,45 @@ def main():
         default=True,
         help="Enable embedding-model optimization (use --no-embedding-use-optimization to disable)",
     )
+    parser.add_argument(
+        "--answer-generation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable answer generation and QA metrics (use --no-answer-generation to run recall-only)",
+    )
+    parser.add_argument("--semantic-top-k", type=int, default=5)
+    parser.add_argument("--keyword-top-k", type=int, default=5)
+    parser.add_argument("--structured-top-k", type=int, default=3)
+    parser.add_argument(
+        "--enable-planning",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable planning in DualViewHybridRetriever",
+    )
+    parser.add_argument(
+        "--enable-reflection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable reflection in DualViewHybridRetriever",
+    )
+    parser.add_argument("--max-reflection-rounds", type=int, default=2)
+    parser.add_argument(
+        "--enable-parallel-retrieval",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable parallel retrieval in DualViewHybridRetriever",
+    )
+    parser.add_argument("--max-retrieval-workers", type=int, default=3)
+    parser.add_argument("--raw-semantic-top-k", type=int, default=None)
+    parser.add_argument("--raw-keyword-top-k", type=int, default=None)
+    parser.add_argument("--mem-sem-weight", type=float, default=0.65)
+    parser.add_argument("--mem-lex-weight", type=float, default=0.35)
+    parser.add_argument("--raw-sem-weight", type=float, default=0.45)
+    parser.add_argument("--raw-lex-weight", type=float, default=0.55)
+    parser.add_argument("--final-mem-weight", type=float, default=0.45)
+    parser.add_argument("--final-raw-weight", type=float, default=0.45)
+    parser.add_argument("--final-agree-weight", type=float, default=0.10)
+    parser.add_argument("--rrf-k", type=int, default=60)
     args = parser.parse_args()
 
     samples = load_locomo_dataset(args.dataset)
@@ -188,6 +225,24 @@ def main():
             llm_client=llm_client,
             vector_store=memory_store,
             raw_vector_store=raw_store,
+            semantic_top_k=args.semantic_top_k,
+            keyword_top_k=args.keyword_top_k,
+            structured_top_k=args.structured_top_k,
+            enable_planning=args.enable_planning,
+            enable_reflection=args.enable_reflection,
+            max_reflection_rounds=args.max_reflection_rounds,
+            enable_parallel_retrieval=args.enable_parallel_retrieval,
+            max_retrieval_workers=args.max_retrieval_workers,
+            raw_semantic_top_k=args.raw_semantic_top_k,
+            raw_keyword_top_k=args.raw_keyword_top_k,
+            mem_sem_weight=args.mem_sem_weight,
+            mem_lex_weight=args.mem_lex_weight,
+            raw_sem_weight=args.raw_sem_weight,
+            raw_lex_weight=args.raw_lex_weight,
+            final_mem_weight=args.final_mem_weight,
+            final_raw_weight=args.final_raw_weight,
+            final_agree_weight=args.final_agree_weight,
+            rrf_k=args.rrf_k,
         )
 
         print(f"\n[DualView QA] sample={sample_idx} db={sample_db}")
@@ -200,21 +255,24 @@ def main():
             contexts = retriever.retrieve(question, enable_reflection=(False if category == 5 else None))
             retrieval_time = time.time() - t0
 
-            t1 = time.time()
-            if category == 5:
-                answer = generate_category5_answer(
-                    llm_client=llm_client,
-                    answer_generator=answer_generator,
-                    question=question,
-                    contexts=contexts,
-                    adversarial_answer=qa.adversarial_answer or "Unknown answer",
-                )
-            else:
-                answer = answer_generator.generate_answer(question, contexts)
-            answer_time = time.time() - t1
+            answer = None
+            answer_time = 0.0
+            if args.answer_generation:
+                t1 = time.time()
+                if category == 5:
+                    answer = generate_category5_answer(
+                        llm_client=llm_client,
+                        answer_generator=answer_generator,
+                        question=question,
+                        contexts=contexts,
+                        adversarial_answer=qa.adversarial_answer or "Unknown answer",
+                    )
+                else:
+                    answer = answer_generator.generate_answer(question, contexts)
+                answer_time = time.time() - t1
 
             metrics = {}
-            if reference_answer:
+            if args.answer_generation and reference_answer and answer is not None:
                 metrics = calculate_metrics(
                     answer,
                     reference_answer,
@@ -295,6 +353,7 @@ def main():
         "avg_retrieval_time": (total_retrieval / total_questions) if total_questions else 0.0,
         "avg_answer_time": (total_answer / total_questions) if total_questions else 0.0,
         "llm_judge_enabled": args.llm_judge,
+        "answer_generation_enabled": args.answer_generation,
     }
     output = {
         "summary": summary,
