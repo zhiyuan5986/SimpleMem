@@ -143,12 +143,30 @@ class BaseLanceVectorStore(ABC, Generic[TEntry]):
             if not keywords or self.table.count_rows() == 0:
                 return []
 
+            # Ensure FTS index exists for reopened databases.
+            # (Index creation is also attempted after first insert, but a fresh
+            # process may reopen an existing table with `_fts_initialized=False`.)
+            self._init_fts_index()
+
             # LanceDB auto-detects string input as FTS query when FTS index exists
             query = " ".join(keywords)
             results = self.table.search(query).limit(top_k).to_list()
             return self._results_to_entries(results)
 
         except Exception as e:
+            # Retry once when table has data but FTS index is missing/corrupted.
+            msg = str(e)
+            if "INVERTED index" in msg or "full text search" in msg.lower():
+                try:
+                    self._fts_initialized = False
+                    self._init_fts_index()
+                    query = " ".join(keywords)
+                    results = self.table.search(query).limit(top_k).to_list()
+                    return self._results_to_entries(results)
+                except Exception as retry_e:
+                    print(f"Error during keyword search (after FTS retry): {retry_e}")
+                    return []
+
             print(f"Error during keyword search: {e}")
             return []
 

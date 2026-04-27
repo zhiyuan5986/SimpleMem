@@ -38,6 +38,8 @@ except Exception as e:
     print(f"Warning: Could not load SentenceTransformer model: {e}")
     sentence_model = None
 
+BERTSCORE_LOCAL_MODEL = "/mnt/sdb/liuqiaoan/all-MiniLM-L6-v2"
+
 
 # ============================================================================
 # Data Structures for LoComo10 Dataset
@@ -303,7 +305,11 @@ def calculate_bleu_scores(prediction: str, reference: str) -> Dict[str, float]:
 def calculate_bert_scores(prediction: str, reference: str) -> Dict[str, float]:
     """Calculate BERTScore for semantic similarity."""
     try:
-        P, R, F1 = bert_score([prediction], [reference], lang='en', verbose=False)
+        bert_kwargs = {"lang": "en", "verbose": False}
+        if os.path.isdir(BERTSCORE_LOCAL_MODEL):
+            # Prefer local model in offline environments to avoid Hugging Face network lookups.
+            bert_kwargs["model_type"] = BERTSCORE_LOCAL_MODEL
+        P, R, F1 = bert_score([prediction], [reference], **bert_kwargs)
         return {
             'bert_precision': P.item(),
             'bert_recall': R.item(),
