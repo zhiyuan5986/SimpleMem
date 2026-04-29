@@ -9,6 +9,7 @@ import argparse
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -182,6 +183,18 @@ def main():
     parser.add_argument("--final-raw-weight", type=float, default=0.45)
     parser.add_argument("--final-agree-weight", type=float, default=0.10)
     parser.add_argument("--rrf-k", type=int, default=60)
+    parser.add_argument(
+        "--question-processing-mode",
+        choices=["sequential", "parallel"],
+        default="sequential",
+        help="Question processing mode inside each sample",
+    )
+    parser.add_argument(
+        "--question-workers",
+        type=int,
+        default=8,
+        help="Max worker threads for parallel question processing",
+    )
     args = parser.parse_args()
 
     samples = load_locomo_dataset(args.dataset)
@@ -246,7 +259,8 @@ def main():
         )
 
         print(f"\n[DualView QA] sample={sample_idx} db={sample_db}")
-        for qa_idx, qa in enumerate(sample.qa):
+
+        def _process_single_question(qa_idx: int, qa: Any) -> dict[str, Any]:
             question = qa.question
             category = qa.category if qa.category is not None else 0
             reference_answer = "Not mentioned in the conversation" if category == 5 else qa.final_answer
@@ -280,9 +294,6 @@ def main():
                     judge_client=judge_client,
                     use_llm_judge=args.llm_judge,
                 )
-                if metrics:
-                    metrics_list.append(metrics)
-                    categories.append(category)
 
             recall = None
             predicted_dia_ids = []
@@ -293,32 +304,64 @@ def main():
                     qa_evidence=qa.evidence or [],
                     raw_store=raw_store,
                 )
-                if recall is not None:
-                    recall_by_category[category].append(recall)
 
-            all_results.append(
-                {
-                    "sample_idx": sample_idx,
-                    "qa_idx": qa_idx,
-                    "question": question,
-                    "category": category,
-                    "reference": reference_answer,
-                    "answer": answer,
-                    "num_retrieved": len(contexts),
-                    "retrieval_time": retrieval_time,
-                    "answer_time": answer_time,
-                    "metrics": metrics,
-                    "evidence_recall": recall,
-                    "predicted_dia_ids": predicted_dia_ids,
-                    "gold_dia_ids": gold_dia_ids,
-                    "dualview_scores": retriever.last_score_details,
-                    "raw_evidence_by_entry_id": retriever.last_raw_evidence_by_entry_id,
+            return {
+                "sample_idx": sample_idx,
+                "qa_idx": qa_idx,
+                "question": question,
+                "category": category,
+                "reference": reference_answer,
+                "answer": answer,
+                "num_retrieved": len(contexts),
+                "retrieval_time": retrieval_time,
+                "answer_time": answer_time,
+                "metrics": metrics,
+                "evidence_recall": recall,
+                "predicted_dia_ids": predicted_dia_ids,
+                "gold_dia_ids": gold_dia_ids,
+                "dualview_scores": retriever.last_score_details,
+                "raw_evidence_by_entry_id": retriever.last_raw_evidence_by_entry_id,
+            }
+
+        sample_results: list[dict[str, Any]] = []
+        if args.question_processing_mode == "parallel" and len(sample.qa) > 1:
+            max_workers = max(1, min(args.question_workers, len(sample.qa)))
+            print(f"  [Parallel Testing] workers={max_workers} questions={len(sample.qa)}")
+            indexed_results: dict[int, dict[str, Any]] = {}
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_idx = {
+                    executor.submit(_process_single_question, qa_idx, qa): qa_idx
+                    for qa_idx, qa in enumerate(sample.qa)
                 }
-            )
-            total_retrieval += retrieval_time
-            total_answer += answer_time
+                for future in as_completed(future_to_idx):
+                    qa_idx = future_to_idx[future]
+                    indexed_results[qa_idx] = future.result()
+                    print(f"  [Parallel Testing] Q{qa_idx+1} completed")
+            sample_results = [indexed_results[i] for i in sorted(indexed_results.keys())]
+        else:
+            for qa_idx, qa in enumerate(sample.qa):
+                sample_results.append(_process_single_question(qa_idx, qa))
+
+        for result in sample_results:
+            all_results.append(result)
+            total_retrieval += result["retrieval_time"]
+            total_answer += result["answer_time"]
             total_questions += 1
-            print(f"  [Q{qa_idx+1}] retrieved={len(contexts)} rt={retrieval_time:.3f}s at={answer_time:.3f}s")
+
+            metrics = result["metrics"]
+            category = result["category"]
+            recall = result["evidence_recall"]
+
+            if metrics:
+                metrics_list.append(metrics)
+                categories.append(category)
+            if recall is not None and category in RECALL_CATEGORIES:
+                recall_by_category[category].append(recall)
+
+            print(
+                f"  [Q{result['qa_idx']+1}] retrieved={result['num_retrieved']} "
+                f"rt={result['retrieval_time']:.3f}s at={result['answer_time']:.3f}s"
+            )
             if metrics:
                 metric_line = (
                     f" f1={metrics.get('f1', 0):.3f}"
