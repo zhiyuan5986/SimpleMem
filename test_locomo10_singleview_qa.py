@@ -130,7 +130,7 @@ def main():
         system = SimpleMemSystem(
             db_path=str(sample_db_path),
             table_name=args.memory_table,
-            clear_db=True,
+            clear_db=False,
         )
         # Force default retrieval path params from script args.
         system.hybrid_retriever.semantic_top_k = args.semantic_top_k
