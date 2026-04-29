@@ -8,6 +8,7 @@ Includes:
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, Generic, TypeVar
 import json
+import threading
 import lancedb
 import pyarrow as pa
 from models.memory_entry import MemoryEntry
@@ -34,6 +35,7 @@ class BaseLanceVectorStore(ABC, Generic[TEntry]):
         self.table_name = table_name or config.MEMORY_TABLE_NAME
         self.table = None
         self._fts_initialized = False
+        self._fts_init_lock = threading.Lock()
 
         # Detect if using cloud storage (GCS, S3, Azure)
         self._is_cloud_storage = self.db_path.startswith(("gs://", "s3://", "az://"))
@@ -46,6 +48,9 @@ class BaseLanceVectorStore(ABC, Generic[TEntry]):
             self.db = lancedb.connect(self.db_path)
 
         self._init_table()
+        # Eagerly initialize FTS in constructor to avoid race conditions when
+        # concurrent workers invoke `keyword_search` for the first time.
+        self._init_fts_index()
 
     @abstractmethod
     def _build_schema(self) -> pa.Schema:
@@ -84,27 +89,30 @@ class BaseLanceVectorStore(ABC, Generic[TEntry]):
         if self._fts_initialized:
             return
 
-        try:
-            if self._is_cloud_storage:
-                # Use native FTS for cloud storage (Tantivy only works with local filesystem)
-                self.table.create_fts_index(
-                    self.fts_column,
-                    use_tantivy=False,
-                    replace=True
-                )
-                print("FTS index created (native mode for cloud storage)")
-            else:
-                # Use Tantivy FTS for local storage (better performance)
-                self.table.create_fts_index(
-                    self.fts_column,
-                    use_tantivy=True,
-                    tokenizer_name="en_stem",
-                    replace=True
-                )
-                print("FTS index created (Tantivy mode)")
-            self._fts_initialized = True
-        except Exception as e:
-            print(f"FTS index creation skipped: {e}")
+        with self._fts_init_lock:
+            if self._fts_initialized:
+                return
+            try:
+                if self._is_cloud_storage:
+                    # Use native FTS for cloud storage (Tantivy only works with local filesystem)
+                    self.table.create_fts_index(
+                        self.fts_column,
+                        use_tantivy=False,
+                        replace=True
+                    )
+                    print("FTS index created (native mode for cloud storage)")
+                else:
+                    # Use Tantivy FTS for local storage (better performance)
+                    self.table.create_fts_index(
+                        self.fts_column,
+                        use_tantivy=True,
+                        tokenizer_name="en_stem",
+                        replace=True
+                    )
+                    print("FTS index created (Tantivy mode)")
+                self._fts_initialized = True
+            except Exception as e:
+                print(f"FTS index creation skipped: {e}")
 
     def add_entries(self, entries: List[TEntry]):
         """Batch add entries."""
