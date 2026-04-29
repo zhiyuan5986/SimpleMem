@@ -10,6 +10,7 @@ This script follows the core flow in test_locomo10.py:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import re
 import time
@@ -103,6 +104,36 @@ def convert_to_dialogues(sample) -> list[Dialogue]:
     return dialogues
 
 
+def process_single_qa(
+    system: SimpleMemSystem,
+    raw_store: RawContextVectorStore,
+    sample_idx: int,
+    qa_idx: int,
+    qa,
+) -> tuple[dict[str, Any], float | None]:
+    category = qa.category if qa.category is not None else 0
+    if category not in RECALL_CATEGORIES:
+        return {}, None
+
+    retrieve_start = time.time()
+    contexts = system.hybrid_retriever.retrieve(qa.question)
+    retrieve_time = time.time() - retrieve_start
+
+    recall, predicted_ids, gold_ids = compute_recall_from_contexts(contexts, qa.evidence, raw_store)
+    result = {
+        "sample_idx": sample_idx,
+        "qa_idx": qa_idx,
+        "category": category,
+        "question": qa.question,
+        "recall": recall,
+        "num_retrieved_entries": len(contexts),
+        "retrieval_time": retrieve_time,
+        "predicted_dia_ids": predicted_ids,
+        "gold_dia_ids": gold_ids,
+    }
+    return result, recall
+
+
 def main():
     parser = argparse.ArgumentParser(description="LoCoMo10 single-view recall eval with llm_spans back-mapping")
     parser.add_argument("--dataset", type=str, default="test_ref/locomo10.json")
@@ -114,6 +145,8 @@ def main():
     parser.add_argument("--semantic-top-k", type=int, default=5)
     parser.add_argument("--keyword-top-k", type=int, default=3)
     parser.add_argument("--structured-top-k", type=int, default=3)
+    parser.add_argument("--parallel-questions", action="store_true", help="Enable parallel QA retrieval within each sample")
+    parser.add_argument("--test-workers", type=int, default=None, help="Number of parallel workers for QA retrieval")
     args = parser.parse_args()
 
     samples = load_locomo_dataset(args.dataset)
@@ -149,33 +182,42 @@ def main():
         system.finalize()
         build_time = time.time() - build_start
 
-        for qa_idx, qa in enumerate(sample.qa):
-            category = qa.category if qa.category is not None else 0
-            if category not in RECALL_CATEGORIES:
-                continue
+        qa_results: list[dict[str, Any]] = []
 
-            retrieve_start = time.time()
-            contexts = system.hybrid_retriever.retrieve(qa.question)
-            retrieve_time = time.time() - retrieve_start
+        if args.parallel_questions and len(sample.qa) > 1:
+            max_workers = args.test_workers if args.test_workers is not None else 16
+            max_workers = min(max_workers, len(sample.qa), 20)
+            max_workers = max(max_workers, 1)
+            print(f"[Parallel QA] sample={sample_idx}, workers={max_workers}, questions={len(sample.qa)}")
 
-            recall, predicted_ids, gold_ids = compute_recall_from_contexts(contexts, qa.evidence, raw_store)
-            if recall is not None:
-                recall_values.append(recall)
-
-            results.append(
-                {
-                    "sample_idx": sample_idx,
-                    "qa_idx": qa_idx,
-                    "category": category,
-                    "question": qa.question,
-                    "recall": recall,
-                    "num_retrieved_entries": len(contexts),
-                    "retrieval_time": retrieve_time,
-                    "build_time": build_time,
-                    "predicted_dia_ids": predicted_ids,
-                    "gold_dia_ids": gold_ids,
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(process_single_qa, system, raw_store, sample_idx, qa_idx, qa): qa_idx
+                    for qa_idx, qa in enumerate(sample.qa)
                 }
-            )
+                ordered: dict[int, tuple[dict[str, Any], float | None]] = {}
+                for future in concurrent.futures.as_completed(futures):
+                    qa_idx = futures[future]
+                    ordered[qa_idx] = future.result()
+                for qa_idx in sorted(ordered.keys()):
+                    result, recall = ordered[qa_idx]
+                    if not result:
+                        continue
+                    result["build_time"] = build_time
+                    qa_results.append(result)
+                    if recall is not None:
+                        recall_values.append(recall)
+        else:
+            for qa_idx, qa in enumerate(sample.qa):
+                result, recall = process_single_qa(system, raw_store, sample_idx, qa_idx, qa)
+                if not result:
+                    continue
+                result["build_time"] = build_time
+                qa_results.append(result)
+                if recall is not None:
+                    recall_values.append(recall)
+
+        results.extend(qa_results)
 
     avg_recall = (sum(recall_values) / len(recall_values)) if recall_values else None
     summary = {
