@@ -3,7 +3,9 @@ Dual-view hybrid retriever over memory entries + raw evidence.
 """
 from __future__ import annotations
 
+import concurrent.futures
 from math import sqrt
+import re
 from typing import Any, Dict, List, Optional
 
 from core.hybrid_retriever import HybridRetriever
@@ -43,6 +45,7 @@ class DualViewHybridRetriever(HybridRetriever):
         final_raw_weight: float = 0.45,
         final_agree_weight: float = 0.10,
         rrf_k: int = 60,
+        keyword_extraction_mode: str = "llm",
     ):
         super().__init__(
             llm_client=llm_client,
@@ -68,6 +71,9 @@ class DualViewHybridRetriever(HybridRetriever):
         self.final_raw_weight = final_raw_weight
         self.final_agree_weight = final_agree_weight
         self.rrf_k = rrf_k
+        if keyword_extraction_mode not in {"llm", "lightweight"}:
+            raise ValueError("keyword_extraction_mode must be one of: llm, lightweight")
+        self.keyword_extraction_mode = keyword_extraction_mode
 
         self.last_score_details: Dict[str, Dict[str, Any]] = {}
         self.last_raw_evidence_by_entry_id: Dict[str, str] = {}
@@ -110,15 +116,32 @@ class DualViewHybridRetriever(HybridRetriever):
         return []
 
     def _dual_view_search(self, query: str, top_n: int) -> List[MemoryEntry]:
-        query_analysis = self._analyze_query(query)
-        keywords = query_analysis.get("keywords", [])
+        keywords = self._extract_query_keywords(query)
         if not keywords:
             keywords = [query]
 
-        mem_sem = self.vector_store.semantic_search(query, top_k=self.semantic_top_k)
-        mem_lex = self.vector_store.keyword_search(keywords, top_k=self.keyword_top_k)
-        raw_sem = self.raw_vector_store.semantic_search(query, top_k=self.raw_semantic_top_k)
-        raw_lex = self.raw_vector_store.keyword_search(keywords, top_k=self.raw_keyword_top_k)
+        def do_mem_sem() -> List[MemoryEntry]:
+            return self.vector_store.semantic_search(query, top_k=self.semantic_top_k) or []
+
+        def do_mem_lex() -> List[MemoryEntry]:
+            return self.vector_store.keyword_search(keywords, top_k=self.keyword_top_k) or []
+
+        def do_raw_sem() -> List[RawContextEntry]:
+            return self.raw_vector_store.semantic_search(query, top_k=self.raw_semantic_top_k) or []
+
+        def do_raw_lex() -> List[RawContextEntry]:
+            return self.raw_vector_store.keyword_search(keywords, top_k=self.raw_keyword_top_k) or []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            future_mem_sem = executor.submit(do_mem_sem)
+            future_mem_lex = executor.submit(do_mem_lex)
+            future_raw_sem = executor.submit(do_raw_sem)
+            future_raw_lex = executor.submit(do_raw_lex)
+
+            mem_sem = future_mem_sem.result()
+            mem_lex = future_mem_lex.result()
+            raw_sem = future_raw_sem.result()
+            raw_lex = future_raw_lex.result()
 
         mem_sem_rrf = self._rrf_by_entry_id(mem_sem)
         mem_lex_rrf = self._rrf_by_entry_id(mem_lex)
@@ -182,6 +205,35 @@ class DualViewHybridRetriever(HybridRetriever):
         self.last_raw_evidence_by_entry_id = raw_map_top
 
         return memory_entries
+
+    def _extract_query_keywords(self, query: str) -> List[str]:
+        if self.keyword_extraction_mode == "llm":
+            query_analysis = self._analyze_query(query)
+            return query_analysis.get("keywords", []) or []
+
+        query_lower = query.lower()
+        skip_words = {
+            "what", "when", "where", "who", "why", "how", "does", "did", "have", "has",
+            "the", "about", "from", "with", "like", "think", "are", "is", "was", "were",
+        }
+        keywords = [
+            w.strip("?.,!'\"")
+            for w in query_lower.split()
+            if len(w) > 2 and w.lower() not in skip_words
+        ]
+
+        possessive_match = re.search(r"([A-Za-z]+)'s\s+(\w+)", query)
+        if possessive_match:
+            attr_word = possessive_match.group(2).lower()
+            keywords.extend([attr_word, f"{attr_word}s", f"{attr_word}ed"])
+
+        deduped: List[str] = []
+        seen = set()
+        for kw in keywords:
+            if kw and kw not in seen:
+                seen.add(kw)
+                deduped.append(kw)
+        return deduped[:5]
 
     def _rrf_by_entry_id(self, results: List[Any]) -> Dict[str, float]:
         scores: Dict[str, float] = {}

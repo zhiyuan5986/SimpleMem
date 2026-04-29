@@ -184,6 +184,12 @@ def main():
     parser.add_argument("--final-agree-weight", type=float, default=0.10)
     parser.add_argument("--rrf-k", type=int, default=60)
     parser.add_argument(
+        "--keyword-extraction-mode",
+        choices=["llm", "lightweight"],
+        default="llm",
+        help="Keyword extraction mode for dual-view lexical retrieval",
+    )
+    parser.add_argument(
         "--question-processing-mode",
         choices=["sequential", "parallel"],
         default="sequential",
@@ -256,6 +262,7 @@ def main():
             final_raw_weight=args.final_raw_weight,
             final_agree_weight=args.final_agree_weight,
             rrf_k=args.rrf_k,
+            keyword_extraction_mode=args.keyword_extraction_mode,
         )
 
         print(f"\n[DualView QA] sample={sample_idx} db={sample_db}")
