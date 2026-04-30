@@ -41,7 +41,8 @@ def load_entries_from_filtered_json(filtered_json_path: Path) -> list[MemoryEntr
         if not isinstance(raw_entries, list):
             continue
 
-        for raw in raw_entries:
+        trace_item_index = item.get("trace_item_index")
+        for entry_index, raw in enumerate(raw_entries):
             if not isinstance(raw, dict):
                 continue
             generated += 1
