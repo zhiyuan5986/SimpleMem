@@ -112,14 +112,14 @@ def process_single_qa(
     qa,
 ) -> tuple[dict[str, Any], float | None]:
     category = qa.category if qa.category is not None else 0
-    if category not in RECALL_CATEGORIES:
-        return {}, None
-
     retrieve_start = time.time()
     contexts = system.hybrid_retriever.retrieve(qa.question)
     retrieve_time = time.time() - retrieve_start
 
-    recall, predicted_ids, gold_ids = compute_recall_from_contexts(contexts, qa.evidence, raw_store)
+    if category in RECALL_CATEGORIES:
+        recall, predicted_ids, gold_ids = compute_recall_from_contexts(contexts, qa.evidence, raw_store)
+    else:
+        recall, predicted_ids, gold_ids = None, [], [str(e).strip() for e in (qa.evidence or []) if str(e).strip()]
     result = {
         "sample_idx": sample_idx,
         "qa_idx": qa_idx,
@@ -127,9 +127,18 @@ def process_single_qa(
         "question": qa.question,
         "recall": recall,
         "num_retrieved_entries": len(contexts),
+        "num_retrieved": len(contexts),
         "retrieval_time": retrieve_time,
+        "answer_time": 0.0,
+        "reference": None,
+        "answer": None,
+        "metrics": {},
+        "evidence_recall": recall,
         "predicted_dia_ids": predicted_ids,
         "gold_dia_ids": gold_ids,
+        "retrieved_entry_ids": [getattr(ctx, "entry_id", None) for ctx in contexts if getattr(ctx, "entry_id", None)],
+        "dualview_scores": {},
+        "raw_evidence_by_entry_id": {},
     }
     return result, recall
 
@@ -155,6 +164,7 @@ def main():
 
     results: list[dict[str, Any]] = []
     recall_values: list[float] = []
+    recall_by_category: dict[int, list[float]] = {1: [], 2: [], 4: []}
 
     base_db_path = Path(args.db_path)
 
@@ -207,6 +217,7 @@ def main():
                     qa_results.append(result)
                     if recall is not None:
                         recall_values.append(recall)
+                        recall_by_category[result["category"]].append(recall)
         else:
             for qa_idx, qa in enumerate(sample.qa):
                 result, recall = process_single_qa(system, raw_store, sample_idx, qa_idx, qa)
@@ -216,17 +227,31 @@ def main():
                 qa_results.append(result)
                 if recall is not None:
                     recall_values.append(recall)
+                    recall_by_category[result["category"]].append(recall)
 
         results.extend(qa_results)
 
     avg_recall = (sum(recall_values) / len(recall_values)) if recall_values else None
+    recall_summary = {}
+    all_recall_values: list[float] = []
+    for c in sorted(RECALL_CATEGORIES):
+        values = recall_by_category.get(c, [])
+        recall_summary[f"category_{c}"] = {
+            "mean_recall": (sum(values) / len(values)) if values else 0.0,
+            "count": len(values),
+        }
+        all_recall_values.extend(values)
+    recall_summary["overall"] = {
+        "mean_recall": (sum(all_recall_values) / len(all_recall_values)) if all_recall_values else 0.0,
+        "count": len(all_recall_values),
+    }
+
     summary = {
         "num_samples": len(samples),
         "num_questions_scored": len(recall_values),
         "average_recall": avg_recall,
     }
-
-    output = {"summary": summary, "results": results}
+    output = {"summary": summary, "recall_summary": recall_summary, "results": results}
     with open(args.result_file, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
