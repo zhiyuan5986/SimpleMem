@@ -178,8 +178,8 @@ def main():
 
         dialogues = convert_to_dialogues(sample)
         build_start = time.time()
-        system.add_dialogues(dialogues)
-        system.finalize()
+        # system.add_dialogues(dialogues)
+        # system.finalize()
         build_time = time.time() - build_start
 
         qa_results: list[dict[str, Any]] = []

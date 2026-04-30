@@ -24,12 +24,6 @@ from main import SimpleMemSystem
 from models.memory_entry import Dialogue
 from database.vector_store import VectorStore
 
-# Download required NLTK data
-try:
-    nltk.download('punkt', quiet=True)
-    nltk.download('wordnet', quiet=True)
-except Exception as e:
-    print(f"Error downloading NLTK data: {e}")
 
 # Initialize SentenceTransformer model for semantic similarity
 try:
@@ -1115,4 +1109,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # Download required NLTK data
+    try:
+        nltk.download('punkt', quiet=True)
+        nltk.download('wordnet', quiet=True)
+    except Exception as e:
+        print(f"Error downloading NLTK data: {e}")
     main()
