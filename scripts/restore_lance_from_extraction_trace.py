@@ -1,8 +1,8 @@
-"""Restore a LanceDB memory_entries folder from an extraction trace JSON.
+"""Restore a LanceDB memory_entries folder from a *_longllmlingua_filtered.json.
 
 Example:
   python scripts/restore_lance_from_extraction_trace.py \
-    --trace deepseek-chat/locomo10_sample_0_extraction_trace.json \
+    --filtered-json deepseek-chat/locomo10_sample_0_longllmlingua_filtered.json \
     --output-db deepseek-chat/memory_entries.lance
 """
 from __future__ import annotations
@@ -20,20 +20,24 @@ from database.vector_store import VectorStore
 from models.memory_entry import MemoryEntry
 
 
-def load_entries_from_trace(trace_path: Path) -> list[MemoryEntry]:
-    with trace_path.open("r", encoding="utf-8") as f:
-        trace = json.load(f)
+def load_entries_from_filtered_json(filtered_json_path: Path) -> list[MemoryEntry]:
+    with filtered_json_path.open("r", encoding="utf-8") as f:
+        filtered = json.load(f)
 
-    if not isinstance(trace, list):
-        raise ValueError("Extraction trace JSON must be a list.")
+    if not isinstance(filtered, dict):
+        raise ValueError("Filtered JSON must be an object with a `results` field.")
+
+    results = filtered.get("results", [])
+    if not isinstance(results, list):
+        raise ValueError("Filtered JSON field `results` must be a list.")
 
     dedup: dict[str, MemoryEntry] = {}
     generated = 0
 
-    for item in trace:
+    for item in results:
         if not isinstance(item, dict):
             continue
-        raw_entries = item.get("extracted_entries", [])
+        raw_entries = item.get("entries", [])
         if not isinstance(raw_entries, list):
             continue
 
@@ -41,17 +45,41 @@ def load_entries_from_trace(trace_path: Path) -> list[MemoryEntry]:
             if not isinstance(raw, dict):
                 continue
             generated += 1
+            entry_id = raw.get("id")
+            if not entry_id:
+                # Keep entry_id strictly aligned with the filtered JSON schema.
+                continue
+
+            entry_text = str(raw.get("entry text", "")).strip()
+            if not entry_text:
+                # A blank memory is not useful for retrieval.
+                continue
+
+            entry_metadata = raw.get("entry_metadata", {})
+            if not isinstance(entry_metadata, dict):
+                entry_metadata = {}
+
+            memory_entry_payload = {
+                "entry_id": entry_id,
+                "lossless_restatement": entry_text,
+                "keywords": entry_metadata.get("keywords", []),
+                "timestamp": entry_metadata.get("timestamp"),
+                "location": entry_metadata.get("location"),
+                "persons": entry_metadata.get("persons", []),
+                "entities": entry_metadata.get("entities", []),
+                "topic": entry_metadata.get("topic"),
+            }
             try:
-                entry = MemoryEntry.model_validate(raw)
+                entry = MemoryEntry.model_validate(memory_entry_payload)
             except Exception:
-                # Skip malformed rows so one bad trace item won't block recovery.
+                # Skip malformed rows so one bad row won't block recovery.
                 continue
             dedup[entry.entry_id] = entry
 
     if not dedup:
-        raise ValueError("No valid extracted_entries found in trace.")
+        raise ValueError("No valid entries found in filtered JSON.")
 
-    print(f"Parsed {generated} extracted entries; deduplicated to {len(dedup)} by entry_id.")
+    print(f"Parsed {generated} filtered entries; deduplicated to {len(dedup)} by entry_id.")
     return list(dedup.values())
 
 
@@ -74,21 +102,21 @@ def normalize_entry(entry: MemoryEntry) -> MemoryEntry:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Recover a memory_entries LanceDB folder from extraction trace JSON.")
-    parser.add_argument("--trace", required=True, help="Path to *_extraction_trace.json")
+    parser = argparse.ArgumentParser(description="Recover a memory_entries LanceDB folder from *_longllmlingua_filtered.json.")
+    parser.add_argument("--filtered-json", required=True, help="Path to *_longllmlingua_filtered.json")
     parser.add_argument("--output-db", required=True, help="Output LanceDB folder path, e.g. deepseek-chat/memory_entries.lance")
     parser.add_argument("--table-name", default="memory_entries", help="LanceDB table name (default: memory_entries)")
     parser.add_argument("--clear", action="store_true", help="If table exists, clear it before writing")
     args = parser.parse_args()
 
-    trace_path = Path(args.trace)
-    if not trace_path.exists():
-        raise FileNotFoundError(f"Trace file not found: {trace_path}")
+    filtered_json_path = Path(args.filtered_json)
+    if not filtered_json_path.exists():
+        raise FileNotFoundError(f"Filtered JSON file not found: {filtered_json_path}")
 
     output_db = Path(args.output_db)
     output_db.parent.mkdir(parents=True, exist_ok=True)
 
-    entries = [normalize_entry(e) for e in load_entries_from_trace(trace_path)]
+    entries = [normalize_entry(e) for e in load_entries_from_filtered_json(filtered_json_path)]
 
     store = VectorStore(db_path=str(output_db), table_name=args.table_name)
     if args.clear:
