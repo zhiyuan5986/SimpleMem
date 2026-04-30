@@ -46,25 +46,29 @@ def load_entries_from_filtered_json(filtered_json_path: Path) -> list[MemoryEntr
             if not isinstance(raw, dict):
                 continue
             generated += 1
-            entry_id = raw.get("entry_id")
+            entry_id = raw.get("id")
             if not entry_id:
-                raw_entry_index = raw.get("entry_index", entry_index)
-                entry_id = f"trace_{trace_item_index}_entry_{raw_entry_index}"
+                # Keep entry_id strictly aligned with the filtered JSON schema.
+                continue
 
-            entry_text = str(raw.get("entry_text", "")).strip()
+            entry_text = str(raw.get("entry text", "")).strip()
             if not entry_text:
                 # A blank memory is not useful for retrieval.
                 continue
 
+            entry_metadata = raw.get("entry_metadata", {})
+            if not isinstance(entry_metadata, dict):
+                entry_metadata = {}
+
             memory_entry_payload = {
                 "entry_id": entry_id,
                 "lossless_restatement": entry_text,
-                "keywords": raw.get("keywords", []),
-                "timestamp": raw.get("timestamp"),
-                "location": raw.get("location"),
-                "persons": raw.get("persons", []),
-                "entities": raw.get("entities", []),
-                "topic": raw.get("topic"),
+                "keywords": entry_metadata.get("keywords", []),
+                "timestamp": entry_metadata.get("timestamp"),
+                "location": entry_metadata.get("location"),
+                "persons": entry_metadata.get("persons", []),
+                "entities": entry_metadata.get("entities", []),
+                "topic": entry_metadata.get("topic"),
             }
             try:
                 entry = MemoryEntry.model_validate(memory_entry_payload)
