@@ -6,6 +6,7 @@ LoCoMo10 QA script using dual-view retrieval:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 import time
@@ -312,6 +313,9 @@ def main():
                     raw_store=raw_store,
                 )
 
+            retrieved_entry_ids = [getattr(ctx, "entry_id", None) for ctx in contexts]
+            retrieved_entry_ids = [eid for eid in retrieved_entry_ids if eid]
+
             return {
                 "sample_idx": sample_idx,
                 "qa_idx": qa_idx,
@@ -320,14 +324,15 @@ def main():
                 "reference": reference_answer,
                 "answer": answer,
                 "num_retrieved": len(contexts),
+                "retrieved_entry_ids": retrieved_entry_ids,
                 "retrieval_time": retrieval_time,
                 "answer_time": answer_time,
                 "metrics": metrics,
                 "evidence_recall": recall,
                 "predicted_dia_ids": predicted_dia_ids,
                 "gold_dia_ids": gold_dia_ids,
-                "dualview_scores": retriever.last_score_details,
-                "raw_evidence_by_entry_id": retriever.last_raw_evidence_by_entry_id,
+                "dualview_scores": copy.deepcopy(retriever.last_score_details),
+                "raw_evidence_by_entry_id": copy.deepcopy(retriever.last_raw_evidence_by_entry_id),
             }
 
         sample_results: list[dict[str, Any]] = []
