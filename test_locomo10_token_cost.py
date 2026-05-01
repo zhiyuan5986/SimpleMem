@@ -52,6 +52,29 @@ def compute_recall(entry_ids: list[str], gold_ids: list[str], raw_store: RawCont
 
 
 
+def select_topk_by_dualview_final_score(
+    candidate_ids: list[str],
+    dualview_scores: dict[str, Any],
+    top_k: int,
+) -> list[str] | None:
+    if len(candidate_ids) <= top_k:
+        return candidate_ids
+
+    scored: list[tuple[str, float]] = []
+    for eid in candidate_ids:
+        score_obj = dualview_scores.get(eid)
+        if not isinstance(score_obj, dict) or "final_score" not in score_obj:
+            return None
+        try:
+            score = float(score_obj["final_score"])
+        except (TypeError, ValueError):
+            return None
+        scored.append((eid, score))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [eid for eid, _ in scored[:top_k]]
+
+
 def select_topk_by_semantic_similarity(
     query: str,
     candidate_ids: list[str],
@@ -121,13 +144,16 @@ def main():
 
         reranked_ids = candidate_ids
         if args.top_k is not None and len(reranked_ids) > args.top_k:
-            reranked_ids = select_topk_by_semantic_similarity(
-                question,
-                reranked_ids,
-                mem_store,
-                embedding_model,
-                args.top_k,
-            )
+            dualview_scores = r.get("dualview_scores") or {}
+            reranked_ids = select_topk_by_dualview_final_score(reranked_ids, dualview_scores, args.top_k)
+            if reranked_ids is None:
+                reranked_ids = select_topk_by_semantic_similarity(
+                    question,
+                    candidate_ids,
+                    mem_store,
+                    embedding_model,
+                    args.top_k,
+                )
 
         entries_map = mem_store.get_entries_by_ids(reranked_ids)
         selected_contexts = [entries_map[eid] for eid in reranked_ids if eid in entries_map]
