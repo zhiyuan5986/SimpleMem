@@ -335,6 +335,8 @@ def main() -> None:
 
     summary: list[dict[str, Any]] = []
     for sample_idx, trace_json in traces:
+        # if sample_idx > 0:
+        #     break
         print(f"[LoCoMo] processing sample={sample_idx} trace={trace_json}")
         summary.append(
             process_single_sample(

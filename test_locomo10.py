@@ -299,10 +299,10 @@ def calculate_bleu_scores(prediction: str, reference: str) -> Dict[str, float]:
 def calculate_bert_scores(prediction: str, reference: str) -> Dict[str, float]:
     """Calculate BERTScore for semantic similarity."""
     try:
-        bert_kwargs = {"lang": "en", "verbose": False}
-        if os.path.isdir(BERTSCORE_LOCAL_MODEL):
-            # Prefer local model in offline environments to avoid Hugging Face network lookups.
-            bert_kwargs["model_type"] = BERTSCORE_LOCAL_MODEL
+        bert_kwargs = {"lang": "en", "verbose": False, "device": "cpu"}
+        # if os.path.isdir(BERTSCORE_LOCAL_MODEL):
+        #     # Prefer local model in offline environments to avoid Hugging Face network lookups.
+        #     bert_kwargs["model_type"] = BERTSCORE_LOCAL_MODEL
         P, R, F1 = bert_score([prediction], [reference], **bert_kwargs)
         return {
             'bert_precision': P.item(),
@@ -792,10 +792,11 @@ Return ONLY the JSON, no other text.
         print(f"Memory building time: {add_time:.2f}s")
 
         # Test each question (parallel or sequential)
-        if enable_parallel_questions and len(sample.qa) > 1:
-            sample_results = self._test_questions_parallel(sample.qa)
-        else:
-            sample_results = self._test_questions_sequential(sample.qa)
+        sample_results = []
+        # if enable_parallel_questions and len(sample.qa) > 1:
+        #     sample_results = self._test_questions_parallel(sample.qa)
+        # else:
+        #     sample_results = self._test_questions_sequential(sample.qa)
 
         return sample_results
     
@@ -968,7 +969,7 @@ Return ONLY the JSON, no other text.
         total_samples = len(samples)
 
         all_results = []
-        model_output_dir = Path(self.system.llm_client.model)
+        model_output_dir = Path(f"{self.system.llm_client.model}_{self.system.embedding_model.model_name.split('/')[-1]}")
         model_output_dir.mkdir(parents=True, exist_ok=True)
 
         base_db_path = Path(self.system.vector_store.db_path)

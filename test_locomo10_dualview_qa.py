@@ -27,7 +27,7 @@ from utils.embedding import EmbeddingModel
 from utils.llm_client import LLMClient
 
 
-RECALL_CATEGORIES = {1, 2, 4}
+RECALL_CATEGORIES = {1, 2, 3, 4}
 
 
 def _collect_dia_ids_from_obj(obj: Any) -> set[str]:
@@ -223,7 +223,7 @@ def main():
     all_results = []
     metrics_list = []
     categories = []
-    recall_by_category: dict[int, list[float]] = {1: [], 2: [], 4: []}
+    recall_by_category: dict[int, list[float]] = {r: [] for r in RECALL_CATEGORIES}
     total_retrieval = 0.0
     total_answer = 0.0
     total_questions = 0

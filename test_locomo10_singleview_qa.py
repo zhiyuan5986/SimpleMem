@@ -22,7 +22,7 @@ from main import SimpleMemSystem
 from models.memory_entry import Dialogue
 from test_locomo10 import load_locomo_dataset
 
-RECALL_CATEGORIES = {1, 2, 4}
+RECALL_CATEGORIES = {1, 2, 3, 4}
 
 
 def _collect_dia_ids_from_obj(obj: Any) -> set[str]:
@@ -164,7 +164,7 @@ def main():
 
     results: list[dict[str, Any]] = []
     recall_values: list[float] = []
-    recall_by_category: dict[int, list[float]] = {1: [], 2: [], 4: []}
+    recall_by_category: dict[int, list[float]] = {r: [] for r in RECALL_CATEGORIES}
 
     base_db_path = Path(args.db_path)
 
