@@ -454,7 +454,10 @@ class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
         """Return raw-context rows whose `links` contains a target memory entry id."""
         try:
             safe_id = memory_entry_id.replace("'", "''")
-            where_clause = f"array_has_any(cast(json_extract(links_json, '$') as list<string>), make_array('{safe_id}'))"
+            # DataFusion SQL parser in current LanceDB runtime rejects `list<string>` casts.
+            # Match the JSON-serialized token directly (e.g. ["<id>", ...]) for prefilter.
+            safe_like_id = safe_id.replace("%", "\\%").replace("_", "\\_")
+            where_clause = f"links_json LIKE '%\"{safe_like_id}\"%'"
             results = self.table.search().where(where_clause, prefilter=True).limit(top_k).to_list()
             return self._results_to_entries(results)
         except Exception as e:
