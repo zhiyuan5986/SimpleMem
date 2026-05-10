@@ -76,6 +76,7 @@ class DualViewHybridRetriever(HybridRetriever):
         self.keyword_extraction_mode = keyword_extraction_mode
 
         self.last_score_details: Dict[str, Dict[str, Any]] = {}
+        self.last_score_details_all: Dict[str, Dict[str, Any]] = {}
         self.last_raw_evidence_by_entry_id: Dict[str, str] = {}
 
     def retrieve(self, query: str, enable_reflection: Optional[bool] = None) -> List[MemoryEntry]:
@@ -188,8 +189,13 @@ class DualViewHybridRetriever(HybridRetriever):
                 "sources": sources,
             }
 
-        ranked_entry_ids = sorted(scored.keys(), key=lambda eid: scored[eid]["final_score"], reverse=True)[:top_n]
+        ranked_entry_ids_all = sorted(scored.keys(), key=lambda eid: scored[eid]["final_score"], reverse=True)
+        ranked_entry_ids = ranked_entry_ids_all[:top_n]
         memory_entries = self._materialize_memory_entries(ranked_entry_ids, raw_text_map)
+
+        debug_details_all: Dict[str, Dict[str, Any]] = {}
+        for entry_id in ranked_entry_ids_all:
+            debug_details_all[entry_id] = dict(scored.get(entry_id, {}))
 
         debug_details: Dict[str, Dict[str, Any]] = {}
         raw_map_top: Dict[str, str] = {}
@@ -202,6 +208,7 @@ class DualViewHybridRetriever(HybridRetriever):
             debug_details[entry.entry_id] = detail
 
         self.last_score_details = debug_details
+        self.last_score_details_all = debug_details_all
         self.last_raw_evidence_by_entry_id = raw_map_top
 
         return memory_entries

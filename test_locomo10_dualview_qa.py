@@ -311,12 +311,26 @@ def main():
             recall = None
             predicted_dia_ids = []
             gold_dia_ids = []
+            entry_id_to_dia_ids: dict[str, list[str]] = {}
             if category in RECALL_CATEGORIES:
                 recall, predicted_dia_ids, gold_dia_ids = compute_recall_from_contexts(
                     contexts=contexts,
                     qa_evidence=qa.evidence or [],
                     raw_store=raw_store,
                 )
+
+                all_ranked_entry_ids = list(getattr(retriever, "last_score_details_all", {}).keys())
+                for entry_id in all_ranked_entry_ids:
+                    linked_rows = raw_store.get_entries_linked_to_memory_id(entry_id, top_k=500)
+                    current_ids: set[str] = set()
+                    if linked_rows:
+                        for raw_entry in linked_rows:
+                            current_ids.update(_collect_dia_ids_from_obj(raw_entry.metadata))
+                    else:
+                        raw_entry = raw_store.get_entry_by_id(entry_id)
+                        if raw_entry is not None:
+                            current_ids.update(_collect_dia_ids_from_obj(raw_entry.metadata))
+                    entry_id_to_dia_ids[entry_id] = sorted(current_ids)
 
             retrieved_entry_ids = [getattr(ctx, "entry_id", None) for ctx in contexts]
             retrieved_entry_ids = [eid for eid in retrieved_entry_ids if eid]
@@ -337,7 +351,9 @@ def main():
                 "predicted_dia_ids": predicted_dia_ids,
                 "gold_dia_ids": gold_dia_ids,
                 "dualview_scores": copy.deepcopy(retriever.last_score_details),
+                "dualview_scores_all": copy.deepcopy(getattr(retriever, "last_score_details_all", {})),
                 "raw_evidence_by_entry_id": copy.deepcopy(retriever.last_raw_evidence_by_entry_id),
+                "entry_id_to_dia_ids": entry_id_to_dia_ids,
             }
 
         sample_results: list[dict[str, Any]] = []
