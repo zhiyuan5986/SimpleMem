@@ -107,9 +107,9 @@ def find_sample_db_dir(sample_idx: int, search_roots: list[Path]) -> Path | None
     return None
 
 
-def init_spans_db(spans_db_dir: Path) -> RawContextVectorStore:
+def init_spans_db(spans_db_dir: Path, table_name: str) -> RawContextVectorStore:
     spans_db_dir.mkdir(parents=True, exist_ok=True)
-    store = RawContextVectorStore(db_path=str(spans_db_dir), table_name="llm_spans")
+    store = RawContextVectorStore(db_path=str(spans_db_dir), table_name=table_name)
     # Ensure FTS is available for keyword/BM25 retrieval even when opening an existing table.
     # This avoids "Cannot perform full text search unless an INVERTED index has been created".
     # store._init_fts_index()
@@ -190,7 +190,7 @@ def process_single_sample(
     if db_dir is None:
         db_dir = args.fallback_spans_root / f"locomo10_sample_{sample_idx}"
         used_fallback_db = True
-    spans_store = init_spans_db(db_dir)
+    spans_store = init_spans_db(db_dir, table_name=args.raw_unit)
 
     max_items = len(trace_data) if args.max_trace_items < 0 else min(args.max_trace_items, len(trace_data))
     results: list[dict[str, Any]] = []
@@ -308,6 +308,7 @@ def process_single_sample(
                             "raw_unit": args.raw_unit,
                         },
                     )
+                    print("Added turn:", turn_entry_id)
 
             entry_results.append(
                 {
