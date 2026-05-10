@@ -204,6 +204,8 @@ def process_single_sample(
 
         max_entries = len(entries) if args.max_entries_per_item < 0 else min(args.max_entries_per_item, len(entries))
         entry_results: list[dict[str, Any]] = []
+        item_turn_links: dict[int, dict[str, Any]] = {}
+        inserted_raw_context_entries: list[dict[str, Any]] = []
 
         for entry_idx in range(max_entries):
             entry_id, entry_text, entry_metadata = parse_entry(entries[entry_idx], item_idx, entry_idx)
@@ -251,64 +253,51 @@ def process_single_sample(
 
             if args.raw_unit == "llm_spans":
                 span_text_joined = " ".join([span.get("span_text", "") for span in spans if span.get("span_text")]).strip()
+                span_db_metadata = {
+                    "sample_idx": sample_idx,
+                    "trace_item_index": item_idx,
+                    "entry_index": entry_idx,
+                    "entry_id": entry_id,
+                    "entry_text": entry_text,
+                    "entry_metadata": entry_metadata,
+                    "support_turns": support_turns,
+                    "support_turn_dia_ids": support_turn_dia_ids,
+                    "llm_spans": spans,
+                    "llm_raw_spans": raw_rows,
+                    "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
+                    "raw_unit": args.raw_unit,
+                }
                 upsert_span_row(
                     spans_store,
                     entry_id=entry_id,
                     text=span_text_joined,
                     links=[entry_id],
-                    metadata={
-                        "sample_idx": sample_idx,
-                        "trace_item_index": item_idx,
-                        "entry_index": entry_idx,
-                        "entry_id": entry_id,
-                        "entry_text": entry_text,
-                        "entry_metadata": entry_metadata,
-                        "support_turns": support_turns,
-                        "support_turn_dia_ids": support_turn_dia_ids,
-                        "llm_spans": spans,
-                        "llm_raw_spans": raw_rows,
-                        "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
-                        "raw_unit": args.raw_unit,
-                    },
+                    metadata=span_db_metadata,
                 )
-            span_db_metadata = {
-                "sample_idx": sample_idx,
-                "trace_item_index": item_idx,
-                "entry_index": entry_idx,
-                "entry_id": entry_id,
-                "entry_text": entry_text,
-                "entry_metadata": entry_metadata,
-                "support_turns": support_turns,
-                "support_turn_dia_ids": support_turn_dia_ids,
-                "llm_spans": spans,
-                "llm_raw_spans": raw_rows,
-                "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
-            }
+                inserted_raw_context_entries.append(
+                    {
+                        "entry_id": entry_id,
+                        "text": span_text_joined,
+                        "links": [entry_id],
+                        "metadata": span_db_metadata,
+                    }
+                )
 
             if args.raw_unit == "turns":
                 for turn in support_turns:
                     turn_text = str(turn.get("turn_text", "")).strip()
                     if not turn_text:
                         continue
-                    turn_entry_id = f"turn::{sample_idx}::{item_idx}::{turn.get('turn_index', -1)}::{uuid.uuid4().hex[:8]}"
-                    turn_dia_id = resolve_original_dia_id(turn)
-                    upsert_span_row(
-                        spans_store,
-                        entry_id=turn_entry_id,
-                        text=turn_text,
-                        links=[entry_id],
-                        metadata={
-                            "sample_idx": sample_idx,
-                            "trace_item_index": item_idx,
-                            "turn_index": turn.get("turn_index"),
-                            "turn_dia_id": turn_dia_id,
-                            "dialogue_id": turn_dia_id,
-                            "support_turn": turn,
-                            "linked_entry_id": entry_id,
-                            "raw_unit": args.raw_unit,
-                        },
-                    )
-                    print("Added turn:", turn_entry_id)
+                    try:
+                        turn_index = int(turn.get("turn_index", -1))
+                    except (TypeError, ValueError):
+                        continue
+                    if turn_index not in item_turn_links:
+                        item_turn_links[turn_index] = {
+                            "turn": dict(turn),
+                            "linked_entry_ids": set(),
+                        }
+                    item_turn_links[turn_index]["linked_entry_ids"].add(entry_id)
 
             entry_results.append(
                 {
@@ -328,12 +317,49 @@ def process_single_sample(
                 }
             )
 
+        if args.raw_unit == "turns":
+            for turn_index, turn_info in sorted(item_turn_links.items(), key=lambda x: x[0]):
+                turn = turn_info["turn"]
+                turn_text = str(turn.get("turn_text", "")).strip()
+                if not turn_text:
+                    continue
+                linked_entry_ids = sorted(turn_info["linked_entry_ids"])
+                turn_dia_id = resolve_original_dia_id(turn)
+                turn_entry_id = str(uuid.uuid4())
+                turn_db_metadata = {
+                    "sample_idx": sample_idx,
+                    "trace_item_index": item_idx,
+                    "turn_index": turn.get("turn_index"),
+                    "turn_dia_id": turn_dia_id,
+                    "dialogue_id": turn_dia_id,
+                    "support_turn": turn,
+                    "linked_entry_ids": linked_entry_ids,
+                    "raw_unit": args.raw_unit,
+                }
+                upsert_span_row(
+                    spans_store,
+                    entry_id=turn_entry_id,
+                    text=turn_text,
+                    links=linked_entry_ids,
+                    metadata=turn_db_metadata,
+                )
+                inserted_raw_context_entries.append(
+                    {
+                        "entry_id": turn_entry_id,
+                        "text": turn_text,
+                        "links": linked_entry_ids,
+                        "metadata": turn_db_metadata,
+                    }
+                )
+                print("Added turn:", turn_entry_id)
+
         results.append(
             {
                 "trace_item_index": item_idx,
                 "dialogue_context_size": len(context),
                 "num_entries_processed": len(entry_results),
                 "entries": entry_results,
+                "inserted_raw_context_entries": inserted_raw_context_entries,
             }
         )
 
