@@ -166,6 +166,88 @@ def load_locomo_dataset(file_path: Union[str, Path]):
     """Backward-compatible alias used by existing evaluation code."""
     return load_longmemeval_dataset(file_path)
 
+# ============================================================================
+# Evaluation Metrics Functions
+# ============================================================================
+
+def simple_tokenize(text):
+    """Simple tokenization function."""
+    text = str(text)
+    return text.lower().replace('.', ' ').replace(',', ' ').replace('!', ' ').replace('?', ' ').split()
+
+def calculate_rouge_scores(prediction: str, reference: str) -> Dict[str, float]:
+    """Calculate ROUGE scores for prediction against reference."""
+    scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
+    scores = scorer.score(reference, prediction)
+    return {
+        'rouge1_f': scores['rouge1'].fmeasure,
+        'rouge2_f': scores['rouge2'].fmeasure,
+        'rougeL_f': scores['rougeL'].fmeasure
+    }
+
+def calculate_bleu_scores(prediction: str, reference: str) -> Dict[str, float]:
+    """Calculate BLEU scores with different n-gram settings."""
+    pred_tokens = nltk.word_tokenize(prediction.lower())
+    ref_tokens = [nltk.word_tokenize(reference.lower())]
+
+    weights_list = [(1, 0, 0, 0), (0.5, 0.5, 0, 0), (0.33, 0.33, 0.33, 0), (0.25, 0.25, 0.25, 0.25)]
+    smooth = SmoothingFunction().method1
+
+    scores = {}
+    for n, weights in enumerate(weights_list, start=1):
+        try:
+            score = sentence_bleu(ref_tokens, pred_tokens, weights=weights, smoothing_function=smooth)
+        except Exception:
+            score = 0.0
+        scores[f'bleu{n}'] = score
+
+    return scores
+
+def calculate_bert_scores(prediction: str, reference: str) -> Dict[str, float]:
+    """Calculate BERTScore for semantic similarity."""
+    try:
+        bert_kwargs = {"lang": "en", "verbose": False, "device": "cpu"}
+        # if os.path.isdir(BERTSCORE_LOCAL_MODEL):
+        #     # Prefer local model in offline environments to avoid Hugging Face network lookups.
+        #     bert_kwargs["model_type"] = BERTSCORE_LOCAL_MODEL
+        P, R, F1 = bert_score([prediction], [reference], **bert_kwargs)
+        return {
+            'bert_precision': P.item(),
+            'bert_recall': R.item(),
+            'bert_f1': F1.item()
+        }
+    except Exception as e:
+        print(f"Error calculating BERTScore: {e}")
+        return {
+            'bert_precision': 0.0,
+            'bert_recall': 0.0,
+            'bert_f1': 0.0
+        }
+
+def calculate_meteor_score(prediction: str, reference: str) -> float:
+    """Calculate METEOR score for the prediction."""
+    try:
+        return meteor_score([reference.split()], prediction.split())
+    except Exception as e:
+        print(f"Error calculating METEOR score: {e}")
+        return 0.0
+
+def calculate_sentence_similarity(prediction: str, reference: str) -> float:
+    """Calculate sentence embedding similarity using SentenceBERT."""
+    if sentence_model is None:
+        return 0.0
+    try:
+        # Encode sentences
+        embedding1 = sentence_model.encode([prediction], convert_to_tensor=True)
+        embedding2 = sentence_model.encode([reference], convert_to_tensor=True)
+
+        # Calculate cosine similarity
+        similarity = pytorch_cos_sim(embedding1, embedding2).item()
+        return float(similarity)
+    except Exception as e:
+        print(f"Error calculating sentence similarity: {e}")
+        return 0.0
+
 def create_judge_llm_client():
     """Create a dedicated LLM client for judge evaluation"""
     from utils.llm_client import LLMClient
@@ -794,7 +876,7 @@ Return ONLY the JSON, no other text.
         total_samples = len(samples)
 
         all_results = []
-        model_output_dir = Path(f"{self.system.llm_client.model}_{self.system.embedding_model.model_name.split('/')[-1]}")
+        model_output_dir = Path(f"longmemeval500_{self.system.llm_client.model}_{self.system.embedding_model.model_name.split('/')[-1]}")
         model_output_dir.mkdir(parents=True, exist_ok=True)
 
         base_db_path = Path(self.system.vector_store.db_path)
@@ -897,7 +979,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Test SimpleMem on LoComo10 dataset')
     parser.add_argument('--dataset', type=str, default='test_ref/longmemeval500.json',
-                       help='Path to LoComo10 dataset')
+                       help='Path to LongMemeVal dataset')
     parser.add_argument('--num-samples', type=int, default=None,
                        help='Number of samples to test (default: all)')
     parser.add_argument('--no-save', action='store_true',

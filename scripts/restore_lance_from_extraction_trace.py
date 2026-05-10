@@ -46,12 +46,12 @@ def load_entries_from_filtered_json(filtered_json_path: Path) -> list[MemoryEntr
             if not isinstance(raw, dict):
                 continue
             generated += 1
-            entry_id = raw.get("id")
+            entry_id = raw.get("entry_id")
             if not entry_id:
                 # Keep entry_id strictly aligned with the filtered JSON schema.
                 continue
 
-            entry_text = str(raw.get("entry text", "")).strip()
+            entry_text = str(raw.get("entry_text", "")).strip()
             if not entry_text:
                 # A blank memory is not useful for retrieval.
                 continue
@@ -123,7 +123,8 @@ def main() -> None:
     if args.clear:
         store.clear()
 
-    store.add_entries(entries)
+    for entry in entries:
+        store.upsert_entry(entry)
     store.optimize()
 
     restored_count = len(store.get_all_entries())

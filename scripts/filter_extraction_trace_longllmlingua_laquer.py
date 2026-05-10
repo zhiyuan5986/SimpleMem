@@ -146,26 +146,30 @@ def turn_window_to_context_turns(coarse_window: dict[str, Any], full_context: li
 
 
 def normalize_context_turns(item: dict[str, Any]) -> tuple[list[str], list[dict[str, Any]]]:
+    dialogue_context = item.get("dialogue_context", [])
     dialogue_text = item.get("dialogue_text", [])
-    if isinstance(dialogue_text, list) and dialogue_text and isinstance(dialogue_text[0], dict):
-        full_context = [str(turn.get("content", "")) for turn in dialogue_text]
+    if dialogue_context and isinstance(dialogue_text, list) and dialogue_text and isinstance(dialogue_text[0], dict):
+        full_context = [str(c) for c in dialogue_context]
         turn_metadata = []
         for idx, turn in enumerate(dialogue_text):
             turn_metadata.append(
                 {
                     "turn_index": idx,
                     "speaker": turn.get("speaker", "Speaker"),
-                    "text": str(turn.get("content", "")),
+                    "text": str(full_context[idx]),
                     "dialogue_id": turn.get("dialogue_id"),
                     "timestamp": turn.get("timestamp"),
                     "metadata": turn.get("metadata", {}),
                 }
             )
-        return full_context, turn_metadata
+    return full_context, turn_metadata
 
-    context = item.get("dialogue_context", [])
-    if isinstance(context, list):
-        return [str(c) for c in context], [{"turn_index": i, "speaker": "Speaker", "text": str(c)} for i, c in enumerate(context)]
+    # if context:
+    #     return [str(c) for c in context], turn_metadata
+    # else:
+    #     return full_context, turn_metadata
+    # if isinstance(context, list):
+    #     return [str(c) for c in context], [{"turn_index": i, "speaker": "Speaker", "text": str(c)} for i, c in enumerate(context)]
     return [], []
 
 

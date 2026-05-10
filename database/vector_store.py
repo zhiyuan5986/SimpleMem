@@ -50,7 +50,7 @@ class BaseLanceVectorStore(ABC, Generic[TEntry]):
         self._init_table()
         # Eagerly initialize FTS in constructor to avoid race conditions when
         # concurrent workers invoke `keyword_search` for the first time.
-        self._init_fts_index()
+        # self._init_fts_index()
 
     @abstractmethod
     def _build_schema(self) -> pa.Schema:

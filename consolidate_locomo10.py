@@ -110,7 +110,7 @@ def init_spans_db(spans_db_dir: Path) -> RawContextVectorStore:
     store = RawContextVectorStore(db_path=str(spans_db_dir), table_name="llm_spans")
     # Ensure FTS is available for keyword/BM25 retrieval even when opening an existing table.
     # This avoids "Cannot perform full text search unless an INVERTED index has been created".
-    store._init_fts_index()
+    # store._init_fts_index()
     return store
 
 
