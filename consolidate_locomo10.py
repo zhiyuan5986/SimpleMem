@@ -126,6 +126,25 @@ def upsert_span_row(
     store.upsert_entry(RawContextEntry(entry_id=entry_id, text=text, links=links, metadata=metadata))
 
 
+def resolve_support_turn_text(turn: dict[str, Any]) -> str:
+    """Resolve support turn text, preferring LoCoMo turn-level `text` field."""
+    for key in ("text", "turn_text", "resolved_text"):
+        val = turn.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+
+    metadata = turn.get("metadata", {})
+    if isinstance(metadata, dict):
+        turn_meta = metadata.get("turn_metadata", {})
+        if isinstance(turn_meta, dict):
+            for key in ("text", "resolved_text"):
+                val = turn_meta.get(key)
+                if val is not None and str(val).strip():
+                    return str(val).strip()
+
+    return ""
+
+
 def attach_turn_dia_ids_to_spans(
     spans: list[dict[str, Any]],
     support_turns: list[dict[str, Any]],
@@ -230,6 +249,7 @@ def process_single_sample(
                 idx = turn["turn_index"]
                 if idx < len(context_turn_meta):
                     turn.update(context_turn_meta[idx])
+                turn["turn_text"] = resolve_support_turn_text(turn)
 
             align_result = {}
             raw_rows = []
@@ -285,7 +305,7 @@ def process_single_sample(
 
             if args.raw_unit == "turns":
                 for turn in support_turns:
-                    turn_text = str(turn.get("turn_text", "")).strip()
+                    turn_text = resolve_support_turn_text(turn)
                     if not turn_text:
                         continue
                     try:
@@ -320,7 +340,7 @@ def process_single_sample(
         if args.raw_unit == "turns":
             for turn_index, turn_info in sorted(item_turn_links.items(), key=lambda x: x[0]):
                 turn = turn_info["turn"]
-                turn_text = str(turn.get("turn_text", "")).strip()
+                turn_text = resolve_support_turn_text(turn)
                 if not turn_text:
                     continue
                 linked_entry_ids = sorted(turn_info["linked_entry_ids"])
