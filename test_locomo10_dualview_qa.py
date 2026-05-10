@@ -86,10 +86,14 @@ def compute_recall_from_contexts(
         entry_id = getattr(ctx, "entry_id", None)
         if not entry_id:
             continue
-        raw_entry = raw_store.get_entry_by_id(entry_id)
-        if raw_entry is None:
-            continue
-        predicted_ids.update(_collect_dia_ids_from_obj(raw_entry.metadata))
+        linked_rows = raw_store.get_entries_linked_to_memory_id(entry_id, top_k=500)
+        if linked_rows:
+            for raw_entry in linked_rows:
+                predicted_ids.update(_collect_dia_ids_from_obj(raw_entry.metadata))
+        else:
+            raw_entry = raw_store.get_entry_by_id(entry_id)
+            if raw_entry is not None:
+                predicted_ids.update(_collect_dia_ids_from_obj(raw_entry.metadata))
 
     matched = predicted_ids.intersection(gold_ids)
     recall = len(matched) / len(gold_ids) if gold_ids else None
@@ -133,6 +137,7 @@ def main():
     parser.add_argument("--db-path", type=str, default="./lancedb_data")
     parser.add_argument("--memory-table", type=str, default="memory_entries")
     parser.add_argument("--raw-table", type=str, default="llm_spans")
+    parser.add_argument("--raw-unit", choices=["llm_spans", "turns"], default="llm_spans")
     parser.add_argument("--result-file", type=str, default="locomo10_dualview_results.json")
     parser.add_argument("--llm-judge", action="store_true", help="Enable LLM-as-judge metric")
     parser.add_argument("--llm-api-key", type=str, default=None, help="LLM API key")
