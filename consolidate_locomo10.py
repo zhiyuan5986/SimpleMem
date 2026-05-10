@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--condition-text", type=str, default="")
     parser.add_argument("--condition-placement", choices=["none", "prepend", "append"], default="prepend")
     parser.add_argument("--model", type=str, required=True, help="Model identifier passed to LAQuer inference wrapper.")
+    parser.add_argument("--raw-unit", choices=["llm_spans", "turns"], default="llm_spans")
     parser.add_argument("--max-trace-items", type=int, default=-1)
     parser.add_argument("--max-entries-per-item", type=int, default=-1)
     parser.add_argument(
@@ -114,8 +116,14 @@ def init_spans_db(spans_db_dir: Path) -> RawContextVectorStore:
     return store
 
 
-def upsert_span_row(store: RawContextVectorStore, entry_id: str, text: str, metadata: dict[str, Any]) -> None:
-    store.upsert_entry(RawContextEntry(entry_id=entry_id, text=text, metadata=metadata))
+def upsert_span_row(
+    store: RawContextVectorStore,
+    entry_id: str,
+    text: str,
+    links: list[str],
+    metadata: dict[str, Any],
+) -> None:
+    store.upsert_entry(RawContextEntry(entry_id=entry_id, text=text, links=links, metadata=metadata))
 
 
 def attach_turn_dia_ids_to_spans(
@@ -221,14 +229,18 @@ def process_single_sample(
                 if idx < len(context_turn_meta):
                     turn.update(context_turn_meta[idx])
 
-            align_result = align_entry_with_laquer(aligner=aligner, entry_text=entry_text, context_turns=support_turns) if support_turns else {}
-            raw_rows = (
-                align_result["results"].to_dict("records")
-                if align_result and "results" in align_result and hasattr(align_result["results"], "to_dict")
-                else []
-            )
-            spans = normalize_spans(rows=raw_rows, context_turns=support_turns)
-            spans = attach_turn_dia_ids_to_spans(spans=spans, support_turns=support_turns)
+            align_result = {}
+            raw_rows = []
+            spans = []
+            if args.raw_unit == "llm_spans":
+                align_result = align_entry_with_laquer(aligner=aligner, entry_text=entry_text, context_turns=support_turns) if support_turns else {}
+                raw_rows = (
+                    align_result["results"].to_dict("records")
+                    if align_result and "results" in align_result and hasattr(align_result["results"], "to_dict")
+                    else []
+                )
+                spans = normalize_spans(rows=raw_rows, context_turns=support_turns)
+                spans = attach_turn_dia_ids_to_spans(spans=spans, support_turns=support_turns)
             support_turn_dia_ids = sorted(
                 {
                     str(resolve_original_dia_id(turn)).strip()
@@ -237,7 +249,28 @@ def process_single_sample(
                 }
             )
 
-            span_text_joined = " ".join([span.get("span_text", "") for span in spans if span.get("span_text")]).strip()
+            if args.raw_unit == "llm_spans":
+                span_text_joined = " ".join([span.get("span_text", "") for span in spans if span.get("span_text")]).strip()
+                upsert_span_row(
+                    spans_store,
+                    entry_id=entry_id,
+                    text=span_text_joined,
+                    links=[entry_id],
+                    metadata={
+                        "sample_idx": sample_idx,
+                        "trace_item_index": item_idx,
+                        "entry_index": entry_idx,
+                        "entry_id": entry_id,
+                        "entry_text": entry_text,
+                        "entry_metadata": entry_metadata,
+                        "support_turns": support_turns,
+                        "support_turn_dia_ids": support_turn_dia_ids,
+                        "llm_spans": spans,
+                        "llm_raw_spans": raw_rows,
+                        "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
+                        "raw_unit": args.raw_unit,
+                    },
+                )
             span_db_metadata = {
                 "sample_idx": sample_idx,
                 "trace_item_index": item_idx,
@@ -251,7 +284,30 @@ def process_single_sample(
                 "llm_raw_spans": raw_rows,
                 "llm_response": {k: v for k, v in align_result.items() if k != "results"} if align_result else {},
             }
-            upsert_span_row(spans_store, entry_id=entry_id, text=span_text_joined, metadata=span_db_metadata)
+
+            if args.raw_unit == "turns":
+                for turn in support_turns:
+                    turn_text = str(turn.get("turn_text", "")).strip()
+                    if not turn_text:
+                        continue
+                    turn_entry_id = f"turn::{sample_idx}::{item_idx}::{turn.get('turn_index', -1)}::{uuid.uuid4().hex[:8]}"
+                    turn_dia_id = resolve_original_dia_id(turn)
+                    upsert_span_row(
+                        spans_store,
+                        entry_id=turn_entry_id,
+                        text=turn_text,
+                        links=[entry_id],
+                        metadata={
+                            "sample_idx": sample_idx,
+                            "trace_item_index": item_idx,
+                            "turn_index": turn.get("turn_index"),
+                            "turn_dia_id": turn_dia_id,
+                            "dialogue_id": turn_dia_id,
+                            "support_turn": turn,
+                            "linked_entry_id": entry_id,
+                            "raw_unit": args.raw_unit,
+                        },
+                    )
 
             entry_results.append(
                 {

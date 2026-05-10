@@ -145,8 +145,8 @@ class DualViewHybridRetriever(HybridRetriever):
 
         mem_sem_rrf = self._rrf_by_entry_id(mem_sem)
         mem_lex_rrf = self._rrf_by_entry_id(mem_lex)
-        raw_sem_rrf = self._rrf_by_entry_id(raw_sem)
-        raw_lex_rrf = self._rrf_by_entry_id(raw_lex)
+        raw_sem_rrf = self._rrf_from_raw_results(raw_sem)
+        raw_lex_rrf = self._rrf_from_raw_results(raw_lex)
         raw_text_map = self._best_raw_text_by_entry(raw_sem, raw_lex)
 
         all_entry_ids = set(mem_sem_rrf) | set(mem_lex_rrf) | set(raw_sem_rrf) | set(raw_lex_rrf)
@@ -244,6 +244,31 @@ class DualViewHybridRetriever(HybridRetriever):
             scores[entry_id] = max(scores.get(entry_id, 0.0), 1.0 / (self.rrf_k + rank))
         return scores
 
+    def _rrf_from_raw_results(self, raw_results: List[RawContextEntry]) -> Dict[str, float]:
+        """
+        Map raw retrieval results (span/turn rows) onto memory entry ids.
+        1) assign each raw row an RRF by raw rank
+        2) distribute score to all linked memory entries (or entry_id fallback)
+        3) rerank memory entries by accumulated score, then compute final entry-level RRF
+        """
+        accum: Dict[str, float] = {}
+        for rank, item in enumerate(raw_results, start=1):
+            row_rrf = 1.0 / (self.rrf_k + rank)
+            links = [x for x in (item.links or []) if x]
+            if not links and item.entry_id:
+                links = [item.entry_id]
+            for memory_entry_id in links:
+                accum[memory_entry_id] = accum.get(memory_entry_id, 0.0) + row_rrf
+
+        if not accum:
+            return {}
+
+        sorted_items = sorted(accum.items(), key=lambda kv: kv[1], reverse=True)
+        return {
+            entry_id: 1.0 / (self.rrf_k + rank)
+            for rank, (entry_id, _) in enumerate(sorted_items, start=1)
+        }
+
     def _best_raw_text_by_entry(
         self,
         raw_sem: List[RawContextEntry],
@@ -251,8 +276,12 @@ class DualViewHybridRetriever(HybridRetriever):
     ) -> Dict[str, str]:
         raw_map: Dict[str, str] = {}
         for item in raw_sem + raw_lex:
-            if item.entry_id not in raw_map and item.text:
-                raw_map[item.entry_id] = item.text
+            links = [x for x in (item.links or []) if x]
+            if not links and item.entry_id:
+                links = [item.entry_id]
+            for linked_entry_id in links:
+                if linked_entry_id not in raw_map and item.text:
+                    raw_map[linked_entry_id] = item.text
         return raw_map
 
     def _materialize_memory_entries(self, entry_ids: List[str], raw_text_map: Dict[str, str]) -> List[MemoryEntry]:

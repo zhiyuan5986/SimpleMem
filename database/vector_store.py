@@ -389,6 +389,7 @@ class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
         return pa.schema([
             pa.field("entry_id", pa.string()),
             pa.field("text", pa.string()),
+            pa.field("links_json", pa.string()),
             pa.field("metadata_json", pa.string()),
             pa.field("vector", pa.list_(pa.float32(), self.embedding_model.dimension))
         ])
@@ -400,6 +401,7 @@ class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
         return {
             "entry_id": entry.entry_id,
             "text": entry.text,
+            "links_json": json.dumps(entry.links, ensure_ascii=False),
             "metadata_json": json.dumps(entry.metadata, ensure_ascii=False),
             "vector": vector,
         }
@@ -412,10 +414,20 @@ class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
                 metadata = json.loads(metadata_json)
             except Exception:
                 metadata = {}
+            links_json = r.get("links_json")
+            if links_json is None:
+                # Backward compatibility with older tables where rows are aligned by entry_id.
+                links = [r["entry_id"]]
+            else:
+                try:
+                    links = json.loads(links_json) or []
+                except Exception:
+                    links = []
             rows.append(
                 RawContextEntry(
                     entry_id=r["entry_id"],
                     text=r.get("text") or "",
+                    links=links,
                     metadata=metadata,
                 )
             )
@@ -437,6 +449,24 @@ class RawContextVectorStore(BaseLanceVectorStore[RawContextEntry]):
         except Exception as e:
             print(f"Error during raw get_entry_by_id: {e}")
             return None
+
+    def get_entries_linked_to_memory_id(self, memory_entry_id: str, top_k: int = 200) -> List[RawContextEntry]:
+        """Return raw-context rows whose `links` contains a target memory entry id."""
+        try:
+            safe_id = memory_entry_id.replace("'", "''")
+            where_clause = f"array_has_any(cast(json_extract(links_json, '$') as list<string>), make_array('{safe_id}'))"
+            results = self.table.search().where(where_clause, prefilter=True).limit(top_k).to_list()
+            return self._results_to_entries(results)
+        except Exception as e:
+            print(f"Error during get_entries_linked_to_memory_id (prefilter query): {e}")
+            # Fallback for engines lacking JSON filter support: scan a bounded slice.
+            try:
+                scanned = self.table.search().limit(max(top_k, 1000)).to_list()
+                entries = self._results_to_entries(scanned)
+                return [entry for entry in entries if memory_entry_id in (entry.links or [])][:top_k]
+            except Exception as inner_e:
+                print(f"Error during get_entries_linked_to_memory_id (fallback): {inner_e}")
+                return []
 
 
 class VectorStore(MemoryEntryVectorStore):
