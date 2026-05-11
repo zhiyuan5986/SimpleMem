@@ -157,6 +157,7 @@ def main():
         help="Enable answer generation and QA metrics (use --no-answer-generation to run recall-only)",
     )
     parser.add_argument("--semantic-top-k", type=int, default=5)
+    parser.add_argument("--top-n", type=int, default=None, help="Final number of entries used for QA; defaults to semantic-top-k")
     parser.add_argument("--keyword-top-k", type=int, default=5)
     parser.add_argument("--structured-top-k", type=int, default=3)
     parser.add_argument(
@@ -280,6 +281,9 @@ def main():
 
             t0 = time.time()
             contexts = retriever.retrieve(question, enable_reflection=(False if category == 5 else None))
+            final_top_n = args.top_n if args.top_n is not None else args.semantic_top_k
+            if final_top_n is not None and final_top_n > 0:
+                contexts = contexts[:final_top_n]
             retrieval_time = time.time() - t0
 
             answer = None
