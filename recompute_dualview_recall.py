@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Recompute LoCoMo evidence recall from test_locomo10_dualview_qa.py JSON outputs.
+"""Recompute dual-view recall and QA metrics from test_locomo10_dualview_qa.py JSON outputs.
 
 This script supports grid search over:
 - mem-sem-weight / mem-lex-weight
 - raw-sem-weight / raw-lex-weight
 - final-mem-weight / final-raw-weight / final-agree-weight
 - top-n (offline cutoff)
+
+It can also recompute answer metrics (including optional LLM judge) from saved
+"answer" / "reference" fields in results.
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+
+from test_locomo10 import aggregate_metrics, calculate_metrics, create_judge_llm_client
 
 RECALL_CATEGORIES = {1, 2, 3, 4}
 
@@ -97,8 +102,41 @@ def recompute_recall_for_result(
     return len(predicted_ids.intersection(gold_ids)) / len(gold_ids)
 
 
+def recompute_answer_metrics(results: list[dict[str, Any]], use_llm_judge: bool) -> dict[str, Any]:
+    judge_client = create_judge_llm_client() if use_llm_judge else None
+
+    metrics_list: list[dict[str, Any]] = []
+    categories: list[int] = []
+    num_valid = 0
+
+    for result in results:
+        answer = result.get("answer")
+        reference = result.get("reference")
+        question = result.get("question")
+        category = result.get("category", 0)
+        if answer is None or reference is None:
+            continue
+
+        metrics = calculate_metrics(
+            answer,
+            reference,
+            question=question,
+            judge_client=judge_client,
+            use_llm_judge=use_llm_judge,
+        )
+        metrics_list.append(metrics)
+        categories.append(category if isinstance(category, int) else 0)
+        num_valid += 1
+
+    return {
+        "num_metric_samples": num_valid,
+        "llm_judge_enabled": use_llm_judge,
+        "aggregated_metrics": aggregate_metrics(metrics_list, categories) if metrics_list else {},
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Grid-search dual-view recall from QA result JSON.")
+    parser = argparse.ArgumentParser(description="Grid-search dual-view recall + optional QA metrics from result JSON.")
     parser.add_argument("--input", type=str, required=True, help="Path to locomo10_dualview_results.json")
     parser.add_argument("--output", type=str, default=None, help="Optional output JSON path")
     parser.add_argument("--mem-sem-weights", type=str, required=True, help="e.g. 0.65,0.7")
@@ -109,6 +147,13 @@ def main() -> None:
     parser.add_argument("--final-raw-weights", type=str, required=True)
     parser.add_argument("--final-agree-weights", type=str, required=True)
     parser.add_argument("--top-n-list", type=str, required=True, help="e.g. 3,5,10")
+    parser.add_argument(
+        "--answer-generation",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable recomputing answer metrics from saved answers (use --no-answer-generation to skip)",
+    )
+    parser.add_argument("--llm-judge", action="store_true", help="Enable LLM-as-judge when recomputing metrics")
     args = parser.parse_args()
 
     data = json.loads(Path(args.input).read_text(encoding="utf-8"))
@@ -176,13 +221,17 @@ def main() -> None:
         rows.append(row)
 
     rows.sort(key=lambda x: x["overall_mean_recall"], reverse=True)
-    output = {
+    output: dict[str, Any] = {
         "input": args.input,
         "num_questions": len(results),
         "num_combinations": len(rows),
         "best": rows[0] if rows else None,
         "combinations": rows,
+        "answer_generation_enabled": args.answer_generation,
     }
+
+    if args.answer_generation:
+        output["recomputed_metrics"] = recompute_answer_metrics(results, use_llm_judge=args.llm_judge)
 
     if args.output:
         Path(args.output).write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
