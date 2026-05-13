@@ -38,8 +38,16 @@ def load_json(path: Path) -> Any:
         return json.load(f)
 
 
-def build_graph(entries: list[dict[str, Any]]) -> tuple[dict[str, set[str]], dict[str, dict[str, Any]]]:
+def normalize_keyword_token(token: str) -> str:
+    return re.sub(r"[^\w]+", "", token).casefold()
+
+
+def build_graph(
+    entries: list[dict[str, Any]],
+    excluded_keywords: set[str] | None = None,
+) -> tuple[dict[str, set[str]], dict[str, dict[str, Any]]]:
     adj: dict[str, set[str]] = defaultdict(set)
+    excluded_keywords = excluded_keywords or set()
     node_info: dict[str, dict[str, Any]] = {}
     for idx, entry in enumerate(entries):
         entry_id = str(entry.get("entry_id") or f"entry_idx_{idx}")
@@ -55,6 +63,8 @@ def build_graph(entries: list[dict[str, Any]]) -> tuple[dict[str, set[str]], dic
         for kw in entry.get("keywords", []) if isinstance(entry.get("keywords", []), list) else []:
             kw = str(kw).strip()
             if not kw:
+                continue
+            if normalize_keyword_token(kw) in excluded_keywords:
                 continue
             k_node = f"keyword::{kw}"
             node_info.setdefault(k_node, {"type": "keyword", "keyword": kw})
@@ -100,6 +110,26 @@ def shortest_path_between_sets(adj: dict[str, set[str]], starts: set[str], targe
     return path
 
 
+
+def extract_speaker_names(sample: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    conv = sample.get("conversation", {}) if isinstance(sample, dict) else {}
+    if not isinstance(conv, dict):
+        return names
+    for value in conv.values():
+        if not isinstance(value, list):
+            continue
+        for msg in value:
+            if not isinstance(msg, dict):
+                continue
+            speaker = msg.get("speaker")
+            if speaker is None:
+                continue
+            s = str(speaker).strip()
+            if s:
+                names.add(normalize_keyword_token(s))
+    return names
+
 def evidence_to_turn_ids(evidence_list: list[Any]) -> list[str]:
     out: list[str] = []
     for ev in evidence_list:
@@ -143,7 +173,9 @@ def main() -> None:
         if not isinstance(results, list):
             continue
 
-        adj, node_info = build_graph(entries)
+        sample_data = dataset[sample_idx] if isinstance(dataset[sample_idx], dict) else {}
+        speaker_names = extract_speaker_names(sample_data)
+        adj, node_info = build_graph(entries, excluded_keywords=speaker_names)
 
         turn_to_entry_nodes: dict[str, set[str]] = defaultdict(set)
         for item in results:
@@ -172,7 +204,7 @@ def main() -> None:
                     if e_node in node_info:
                         turn_to_entry_nodes[turn_id].add(e_node)
 
-        sample_qas = dataset[sample_idx].get("qa", []) if isinstance(dataset[sample_idx], dict) else []
+        sample_qas = sample_data.get("qa", []) if isinstance(sample_data, dict) else []
         sample_out: dict[str, Any] = {
             "sample_idx": sample_idx,
             "memory_file": str(mem_file),
