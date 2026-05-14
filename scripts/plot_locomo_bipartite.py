@@ -8,7 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from itertools import combinations
 import json
 from pathlib import Path
@@ -131,6 +131,115 @@ def collect_keyword_and_pair_stats(entries: list[dict]) -> tuple[dict[str, list[
     return keyword_to_entries_texts, pair_to_shared_entries_texts, keyword_degree_hist, pair_shared_hist
 
 
+def collect_entity_shortest_paths_stats(entries: list[dict]) -> tuple[dict[str, dict], Counter, int]:
+    """Collect all shortest paths between each entity (keyword) pair in the bipartite graph.
+
+    Returns:
+        pair_to_paths: "kw1 || kw2" -> {"shortest_length": int, "paths": ["kw1 -> E1 -> kw2", ...]}
+        shortest_length_hist: shortest path length -> number of connected keyword pairs
+        disconnected_pair_count: number of keyword pairs that are not connected
+    """
+    keyword_to_entry_idxs: dict[str, set[int]] = defaultdict(set)
+    entry_texts: list[str] = []
+    for idx, entry in enumerate(entries):
+        entry_texts.append(str(entry.get("lossless_restatement", "")).strip())
+        keywords = entry.get("keywords", [])
+        if not isinstance(keywords, list):
+            continue
+        dedup_keywords = {str(kw).strip() for kw in keywords if str(kw).strip()}
+        for kw in dedup_keywords:
+            keyword_to_entry_idxs[kw].add(idx)
+
+    entry_to_keywords: dict[int, set[str]] = defaultdict(set)
+    for kw, idxs in keyword_to_entry_idxs.items():
+        for idx in idxs:
+            entry_to_keywords[idx].add(kw)
+
+    def keyword_neighbors(kw: str) -> list[str]:
+        return [f"entry::{idx}" for idx in sorted(keyword_to_entry_idxs.get(kw, set()))]
+
+    def entry_neighbors(entry_node: str) -> list[str]:
+        entry_idx = int(entry_node.split("::", 1)[1])
+        return [f"keyword::{kw}" for kw in sorted(entry_to_keywords.get(entry_idx, set()))]
+
+    def get_neighbors(node: str) -> list[str]:
+        if node.startswith("keyword::"):
+            return keyword_neighbors(node.split("::", 1)[1])
+        return entry_neighbors(node)
+
+    def format_path(path_nodes: list[str]) -> str:
+        formatted_parts: list[str] = []
+        for node in path_nodes:
+            if node.startswith("keyword::"):
+                formatted_parts.append(node.split("::", 1)[1])
+            else:
+                entry_idx = int(node.split("::", 1)[1])
+                entry_text = entry_texts[entry_idx]
+                short_text = entry_text if len(entry_text) <= 30 else f"{entry_text[:27]}..."
+                formatted_parts.append(f"E{entry_idx}({short_text})")
+        return " -> ".join(formatted_parts)
+
+    def all_shortest_paths_between_keywords(src_kw: str, dst_kw: str) -> list[list[str]]:
+        src = f"keyword::{src_kw}"
+        dst = f"keyword::{dst_kw}"
+        dist: dict[str, int] = {src: 0}
+        parents: dict[str, list[str]] = defaultdict(list)
+        q = deque([src])
+        min_dst_dist: int | None = None
+
+        while q:
+            node = q.popleft()
+            d = dist[node]
+            if min_dst_dist is not None and d >= min_dst_dist:
+                continue
+
+            for nb in get_neighbors(node):
+                nd = d + 1
+                if nb not in dist:
+                    dist[nb] = nd
+                    parents[nb].append(node)
+                    if nb == dst:
+                        min_dst_dist = nd
+                    q.append(nb)
+                elif dist[nb] == nd:
+                    parents[nb].append(node)
+
+        if dst not in dist:
+            return []
+
+        all_paths: list[list[str]] = []
+
+        def backtrack(cur: str, acc: list[str]) -> None:
+            if cur == src:
+                all_paths.append([src] + list(reversed(acc)))
+                return
+            for p in parents[cur]:
+                backtrack(p, acc + [cur])
+
+        backtrack(dst, [])
+        return all_paths
+
+    keywords_sorted = sorted(keyword_to_entry_idxs.keys())
+    pair_to_paths: dict[str, dict] = {}
+    shortest_length_hist: Counter = Counter()
+    disconnected_pair_count = 0
+
+    for kw1, kw2 in combinations(keywords_sorted, 2):
+        paths = all_shortest_paths_between_keywords(kw1, kw2)
+        if not paths:
+            disconnected_pair_count += 1
+            continue
+        shortest_len = len(paths[0]) - 1
+        pair_key = f"{kw1} || {kw2}"
+        pair_to_paths[pair_key] = {
+            "shortest_length": shortest_len,
+            "paths": [format_path(p) for p in paths],
+        }
+        shortest_length_hist[shortest_len] += 1
+
+    return pair_to_paths, shortest_length_hist, disconnected_pair_count
+
+
 def render_histogram(hist: Counter, title: str, x_name: str, y_name: str, output_path: Path) -> None:
     x_vals = sorted(hist.keys())
     y_vals = [hist[x] for x in x_vals]
@@ -193,16 +302,24 @@ def main() -> None:
         print(f"[Saved] {output_path}")
 
         keyword_to_entries, pair_to_entries, keyword_degree_hist, pair_shared_hist = collect_keyword_and_pair_stats(entries)
+        pair_to_shortest_paths, shortest_path_len_hist, disconnected_pair_count = collect_entity_shortest_paths_stats(entries)
 
         keyword_json_path = args.output_dir / f"{file_path.stem}_keyword_to_entries.json"
         pair_json_path = args.output_dir / f"{file_path.stem}_entity_pair_shared_entries.json"
+        shortest_paths_json_path = args.output_dir / f"{file_path.stem}_entity_pair_shortest_paths.json"
+        shortest_paths_disconnected_json_path = args.output_dir / f"{file_path.stem}_entity_pair_shortest_paths_disconnected_stats.json"
         save_json(keyword_to_entries, keyword_json_path)
         save_json(pair_to_entries, pair_json_path)
+        save_json(pair_to_shortest_paths, shortest_paths_json_path)
+        save_json({"disconnected_pair_count": disconnected_pair_count}, shortest_paths_disconnected_json_path)
         print(f"[Saved] {keyword_json_path}")
         print(f"[Saved] {pair_json_path}")
+        print(f"[Saved] {shortest_paths_json_path}")
+        print(f"[Saved] {shortest_paths_disconnected_json_path}")
 
         keyword_hist_path = args.output_dir / f"{file_path.stem}_keyword_degree_histogram.pdf"
         pair_hist_path = args.output_dir / f"{file_path.stem}_entity_pair_shared_entries_histogram.pdf"
+        shortest_path_hist_path = args.output_dir / f"{file_path.stem}_entity_pair_shortest_path_length_histogram.pdf"
 
         render_histogram(
             keyword_degree_hist,
@@ -218,8 +335,16 @@ def main() -> None:
             y_name="Entity Pair Count",
             output_path=pair_hist_path,
         )
+        render_histogram(
+            shortest_path_len_hist,
+            title=f"Shortest Path Length Distribution Between Entity Pairs: {file_path.name}",
+            x_name="Shortest path length",
+            y_name="Connected entity pair count",
+            output_path=shortest_path_hist_path,
+        )
         print(f"[Saved] {keyword_hist_path}")
         print(f"[Saved] {pair_hist_path}")
+        print(f"[Saved] {shortest_path_hist_path}")
 
 
 if __name__ == "__main__":
