@@ -224,6 +224,7 @@ def collect_entity_shortest_paths_stats(entries: list[dict]) -> tuple[dict[str, 
     shortest_length_hist: Counter = Counter()
     disconnected_pair_count = 0
 
+    done = 0
     for kw1, kw2 in combinations(keywords_sorted, 2):
         paths = all_shortest_paths_between_keywords(kw1, kw2)
         if not paths:
@@ -236,6 +237,9 @@ def collect_entity_shortest_paths_stats(entries: list[dict]) -> tuple[dict[str, 
             "paths": [format_path(p) for p in paths],
         }
         shortest_length_hist[shortest_len] += 1
+        done += 1
+        if done % 1000 == 0:
+            print(f"Done {done}/{len(list(combinations(keywords_sorted, 2)))}")
 
     return pair_to_paths, shortest_length_hist, disconnected_pair_count
 

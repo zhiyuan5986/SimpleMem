@@ -218,7 +218,8 @@ def main() -> None:
             evidence = qa.get("evidence", [])
             if not isinstance(evidence, list) or len(evidence) <= 1:
                 continue
-            turn_ids = evidence_to_turn_ids(evidence)
+            # turn_ids = evidence_to_turn_ids(evidence)
+            turn_ids = evidence
             turn_nodes = {tid: sorted(turn_to_entry_nodes.get(tid, set())) for tid in turn_ids}
 
             pair_records: list[dict[str, Any]] = []
